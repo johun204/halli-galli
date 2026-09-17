@@ -1,0 +1,22 @@
+{
+  "name": "halli-galli-worker",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "npm run build --prefix ../client && wrangler deploy",
+    "test": "node --import tsx --test src/*.test.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260822.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "wrangler": "^4.125.0"
+  },
+  "allowScripts": {
+    "workerd@1.20260820.1": true,
+    "esbuild@0.28.2": true,
+    "esbuild@0.28.1": true
+  }
+}
