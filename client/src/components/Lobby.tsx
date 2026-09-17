@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react';
 import { useState } from 'react';
-
-const LAST_NAME_KEY = 'halligalli:lastName';
+import { loadLastName, saveLastName } from '../identity';
 
 export function NameGate({
   title,
@@ -16,12 +15,12 @@ export function NameGate({
   busy?: boolean;
   children?: ReactNode;
 }) {
-  const [name, setName] = useState(() => localStorage.getItem(LAST_NAME_KEY) ?? '');
+  const [name, setName] = useState(loadLastName);
 
   function submit() {
     const trimmed = name.trim();
     if (!trimmed) return;
-    localStorage.setItem(LAST_NAME_KEY, trimmed);
+    saveLastName(trimmed);
     onSubmit(trimmed);
   }
 

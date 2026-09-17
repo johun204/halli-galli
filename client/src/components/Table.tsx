@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { EmojiEvent } from '../hooks/useRoom';
-import type { BellResult, PublicPlayer, ReactionEmoji } from '../types';
+import type { BellResult, PublicPlayer, ReactionEmoji } from '../../../shared/types';
 import { Bell } from './Bell';
 import { CardBack, CardFace } from './Card';
 import { PlayerBadge } from './PlayerBadge';
@@ -36,6 +36,7 @@ export function Table({
   lastEmoji,
   myReaction,
   myPendingFlip,
+  bellPending,
   serverNow,
   onRing,
 }: {
@@ -47,6 +48,7 @@ export function Table({
   lastEmoji: EmojiEvent | null;
   myReaction: { id: number; emoji: ReactionEmoji } | null;
   myPendingFlip: boolean;
+  bellPending: boolean;
   serverNow: number;
   onRing: () => void;
 }) {
@@ -86,7 +88,7 @@ export function Table({
       const from = positions.get(lastBellResult.penalizedIds[0])?.seat;
       if (from) {
         for (const p of players) {
-          if (p.id === lastBellResult.penalizedIds[0]) continue;
+          if (p.id === lastBellResult.penalizedIds[0] || p.eliminated) continue; // 탈락자는 벌칙 카드를 안 받음
           const to = positions.get(p.id)?.seat;
           if (to) built.push({ key: `${lastBellResult.id}-${p.id}`, from, to, phase: 'start' });
         }
@@ -124,7 +126,7 @@ export function Table({
   return (
     <div className="table">
       <div className="table-ring">
-        <div className="table-bell">
+        <div className={`table-bell ${bellPending ? 'table-bell-pending' : ''}`}>
           <Bell onRing={onRing} />
         </div>
 

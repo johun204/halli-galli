@@ -1,20 +1,17 @@
-import type { RoomPublicState } from './types';
+import type { RoomPublicState } from '../../shared/types';
 
+// 최근 이만큼의 측정 중 왕복지연이 가장 짧았던 것의 오프셋을 씀 - 측정할 때마다 보정값이 튀지 않게
+const CLOCK_SAMPLES = 10;
+let clockSamples: { rtt: number; offset: number }[] = [];
 let offsetMs = 0;
 
-/** 서버-클라이언트 시계 오프셋 동기화 (Cristian's algorithm). RTT가 가장 짧은 샘플을 채택. */
-export async function syncClock(samples = 5): Promise<void> {
-  let best: { rtt: number; offset: number } | null = null;
-  for (let i = 0; i < samples; i++) {
-    const t0 = Date.now();
-    const res = await fetch('/api/time');
-    const data = await res.json();
-    const t1 = Date.now();
-    const rtt = t1 - t0;
-    const offset = data.serverTime - (t0 + t1) / 2;
-    if (!best || rtt < best.rtt) best = { rtt, offset };
-  }
-  if (best) offsetMs = best.offset;
+/**
+ * 서버-클라이언트 시계 오프셋 동기화 (Cristian's algorithm).
+ * 판정하는 서버(Durable Object)와 웹소켓 ping/pong으로 직접 재서 실제 종 신호가 오가는 경로와 같은 조건으로 맞춤.
+ */
+export function recordClockSample(t0: number, t1: number, serverTime: number) {
+  clockSamples = [...clockSamples, { rtt: t1 - t0, offset: serverTime - (t0 + t1) / 2 }].slice(-CLOCK_SAMPLES);
+  offsetMs = clockSamples.reduce((best, s) => (s.rtt < best.rtt ? s : best)).offset;
 }
 
 /** 지금 이 순간을 서버 기준 시각으로 보정한 값. 종치기 판정에 사용. */

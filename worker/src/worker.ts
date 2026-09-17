@@ -16,23 +16,9 @@ function randomCode(): string {
   return String(Math.floor(Math.random() * CODE_SPACE)).padStart(4, '0');
 }
 
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-};
-
+// 프론트엔드와 API를 같은 워커가 같은 주소에서 서빙하므로 CORS 헤더는 필요 없음
 function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },
-  });
-}
-
-function withCors(res: Response): Response {
-  const headers = new Headers(res.headers);
-  for (const [k, v] of Object.entries(CORS_HEADERS)) headers.set(k, v);
-  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+  return Response.json(body, { status });
 }
 
 function forward(stub: DurableObjectStub, path: string, request: Request): Promise<Response> {
@@ -43,19 +29,11 @@ function forward(stub: DurableObjectStub, path: string, request: Request): Promi
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: CORS_HEADERS });
-    }
-
     const url = new URL(request.url);
     const parts = url.pathname.split('/').filter(Boolean); // ['api', ...]
 
     // /api/* 가 아니면 정적 프론트엔드(React 빌드)로 위임 — Vercel/Netlify 불필요
     if (parts[0] !== 'api') return env.ASSETS.fetch(request);
-
-    if (parts[1] === 'time' && request.method === 'GET') {
-      return json({ serverTime: Date.now() });
-    }
 
     if (parts[1] === 'rooms' && parts.length === 2 && request.method === 'POST') {
       const bodyText = await request.text();
@@ -67,24 +45,25 @@ export default {
           headers: { 'Content-Type': 'application/json' },
           body: bodyText,
         });
-        if (res.status !== 409) return withCors(res);
+        if (res.status !== 409) return res;
       }
       return json({ error: 'ROOMS_EXHAUSTED' }, 503);
     }
 
-    if (parts[1] === 'rooms' && parts.length >= 4) {
+    // 코드 형식이 틀리면 Durable Object를 만들지 않음
+    if (parts[1] === 'rooms' && parts.length >= 4 && /^\d{4}$/.test(parts[2])) {
       const code = parts[2];
       const action = parts[3];
       const stub = env.ROOM.get(env.ROOM.idFromName(code));
 
       if (action === 'join' && request.method === 'POST') {
-        return withCors(await forward(stub, '/join', request));
+        return forward(stub, '/join', request);
       }
       if (action === 'status' && request.method === 'GET') {
-        return withCors(await forward(stub, '/status', request));
+        return forward(stub, '/status', request);
       }
       if (action === 'ws') {
-        return forward(stub, '/ws', request); // 웹소켓 업그레이드 응답에는 CORS 헤더를 얹지 않음
+        return forward(stub, '/ws', request);
       }
     }
 

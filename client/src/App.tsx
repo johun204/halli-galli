@@ -2,17 +2,16 @@ import { useEffect, useRef, useState } from 'react';
 import { checkRoomStatus, createRoom, joinRoom, type Identity } from './api';
 import { GameBoard } from './components/GameBoard';
 import { NameGate } from './components/Lobby';
-import { clearLastRoom, loadIdentity, loadLastRoom, saveIdentity } from './identity';
-
-const LAST_NAME_KEY = 'halligalli:lastName';
+import { MAX_PLAYERS } from '../../shared/types';
+import { clearLastRoom, forgetRoom, loadIdentity, loadLastName, loadLastRoom, saveIdentity, saveLastName } from './identity';
 
 const ERROR_KO: Record<string, string> = {
   EMPTY_NAME: '닉네임을 입력해주세요',
   ROOM_NOT_FOUND: '존재하지 않는 초대코드예요',
   ROOM_UNREACHABLE: '방에 접속할 수 없어요. 방이 사라졌거나 만료됐을 수 있어요',
   ROOMS_EXHAUSTED: '지금은 방을 만들 수 없어요. 잠시 후 다시 시도해주세요',
-  ROOM_FULL: '방이 가득 찼어요 (최대 6명)',
-  ALREADY_STARTED: '이미 시작된 방이에요',
+  ROOM_FULL: `방이 가득 찼어요 (최대 ${MAX_PLAYERS}명)`,
+  ALREADY_STARTED: '지금 게임 중인 방이에요. 판이 끝나면 들어올 수 있어요',
 };
 
 function useToast() {
@@ -75,7 +74,7 @@ function Home({
   pendingToastCode: string | null;
   onPendingToastShown: () => void;
 }) {
-  const [name, setName] = useState(() => localStorage.getItem(LAST_NAME_KEY) ?? '');
+  const [name, setName] = useState(loadLastName);
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [resumeCode, setResumeCode] = useState<string | null>(null);
@@ -108,7 +107,7 @@ function Home({
 
   function commitName(): string {
     const trimmed = name.trim();
-    if (trimmed) localStorage.setItem(LAST_NAME_KEY, trimmed);
+    if (trimmed) saveLastName(trimmed);
     return trimmed;
   }
 
@@ -228,7 +227,18 @@ function RoomEntry({
   const [busy, setBusy] = useState(false);
   const { toast, show } = useToast();
 
-  if (identity) return <GameBoard code={code} identity={identity} onUnreachable={onUnreachable} />;
+  if (identity)
+    return (
+      <GameBoard
+        code={code}
+        identity={identity}
+        onUnreachable={onUnreachable}
+        onLeave={() => {
+          forgetRoom(code);
+          navigate('/');
+        }}
+      />
+    );
 
   return (
     <div>

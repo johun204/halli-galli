@@ -1,18 +1,26 @@
 import { buildDeck, shuffle } from './deck';
-import type { BellResult, Card, Fruit, LastFlip, Phase, PublicPlayer, RoomPublicState } from './types';
+import { MAX_PLAYERS, MAX_TURN_SEC, MIN_TURN_SEC } from '../../shared/types';
+import type { BellResult, Card, Fruit, LastFlip, Phase, PublicPlayer, RoomPublicState } from '../../shared/types';
 
+export { MAX_PLAYERS, MAX_TURN_SEC, MIN_TURN_SEC };
 export const MIN_PLAYERS = 2;
-export const MAX_PLAYERS = 6;
-export const MIN_TURN_SEC = 5;
-export const MAX_TURN_SEC = 30;
 export const DEFAULT_TURN_SEC = 10;
 const DECK_SIZE = buildDeck().length;
 
 // 최초로 도착한 종으로부터 이만큼 기다렸다가, 모인 종들을 "실제로 누른 시각(서버 기준 보정)" 순으로 판정
 const BELL_WINDOW_MS = 500;
-// ponytail: 클라이언트가 보낸 보정 시각은 도착 시각 기준 최대 1초 전까지만 믿음(시계 조작/동기화 실패 방어).
-// 지연이 이보다 큰 환경까지 보정해야 하면 접속별 실측 RTT로 한도를 잡으면 됨.
+// 클라이언트가 보낸 보정 시각은 도착 시각 기준 최대 1초 전까지만 믿음(시계 조작/동기화 실패 방어)
 const MAX_LAG_MS = 1000;
+// ponytail: 사람이 카드를 보고 종을 치기까지 걸리는 최소 시간을 고정값으로 가정. 이보다 빨리 눌렀다는 주장은 잘라냄(조작 방지)
+const MIN_REACTION_MS = 80;
+// 화면이 서버보다 늦게 바뀌는 걸 인정해주는 여유 = 그 사람의 왕복지연 + 이만큼
+const STALE_MARGIN_MS = 100;
+// 서버가 잰 왕복지연은 최근 몇 개 샘플 중 최솟값을 씀 (일시적인 튐 무시)
+const RTT_SAMPLES = 5;
+// 카드가 0장인 사람에게 차례가 오면 바로 탈락시키지 않고, 앞사람 카드에 종을 칠 수 있게 이만큼 기다림
+const OUT_OF_CARDS_GRACE_MS = 2000;
+// 방장이 이만큼 접속이 끊겨 있으면 접속 중인 다음 사람에게 방장을 넘김
+const HOST_TRANSFER_MS = 10_000;
 // 종이 울린 뒤 결과를 보여주며 게임을 멈추는 시간.
 const RESULT_PAUSE_MS = 3000;
 
@@ -31,6 +39,15 @@ interface PendingBell {
   playerId: string;
   /** 서버 기준으로 보정된, 실제로 종을 누른 시각 */
   pressedAt: number;
+  /** 누른 순간 그 사람 화면의 카드 상태에서 5를 만족하던 과일 (없으면 null = 오답) */
+  fruit: Fruit | null;
+}
+
+/** 카드 상태가 바뀐 시점 기록. flipId = 그 시점의 lastFlip.resultId (클라이언트가 보낸 seenFlipId와 맞춰봄) */
+interface ConditionMark {
+  at: number;
+  flipId: number;
+  fruit: Fruit | null;
 }
 
 /** Durable Object의 storage에 그대로 넣을 수 있는 직렬화 가능한 형태 */
@@ -56,10 +73,11 @@ export class Room {
   currentTurnIndex = 0;
   winnerId: string | null = null;
 
-  // 이번 판(마지막 종 판정 이후) 카드 상태가 바뀐 시각과 그때 5를 만족한 과일 - 늦게 도착한 종을 "누른 순간" 상태로 판정하기 위함
-  private conditionLog: { at: number; fruit: Fruit | null }[] = [];
+  // 이번 판(마지막 종 판정 이후) 카드 상태 변화 기록 - 늦게 도착한 종을 "누른 순간 그 사람 화면" 기준으로 판정하기 위함
+  private conditionLog: ConditionMark[] = [];
   private pendingBellBuffer: PendingBell[] = [];
   private graceTimer: ReturnType<typeof setTimeout> | null = null;
+  private rttSamples = new Map<string, number[]>();
 
   private flipCounter = 0;
   private bellCounter = 0;
@@ -74,6 +92,8 @@ export class Room {
   private pauseTimer: ReturnType<typeof setTimeout> | null = null;
   // ponytail: 테스트에서만 짧게 오버라이드. 실제 값은 항상 RESULT_PAUSE_MS.
   private resultPauseMs = RESULT_PAUSE_MS;
+
+  private hostTimer: ReturnType<typeof setTimeout> | null = null;
 
   // 재접속 시 턴 타이머를 원래 시간으로 되돌리는 걸 이번 턴에 이미 썼는지
   private turnResetUsed = false;
@@ -123,24 +143,24 @@ export class Room {
     };
   }
 
-  /** 대기 중인 타이머를 전부 정리 (테스트 종료 시 / DO가 명시적으로 방을 접을 때 사용) */
+  /** 대기 중인 타이머를 전부 정리 (테스트 종료 시 / DO가 방을 비울 때 사용) */
   destroy() {
-    if (this.turnTimer) clearTimeout(this.turnTimer);
-    if (this.graceTimer) clearTimeout(this.graceTimer);
-    if (this.pauseTimer) clearTimeout(this.pauseTimer);
+    for (const t of [this.turnTimer, this.graceTimer, this.pauseTimer, this.hostTimer]) if (t) clearTimeout(t);
     this.turnTimer = null;
     this.graceTimer = null;
     this.pauseTimer = null;
+    this.hostTimer = null;
   }
 
-  /** 방 생성 시점에만 씀 (아직 아무도 없어서 host 검증이 의미 없는 시점) */
-  configureTurnLimit(sec: number) {
+  /** 방 생성 시점에만 씀 (아직 아무도 없어서 host 검증이 의미 없는 시점). 숫자가 아니면 무시 */
+  configureTurnLimit(sec: unknown) {
+    if (typeof sec !== 'number' || !Number.isFinite(sec)) return;
     const clamped = Math.min(MAX_TURN_SEC, Math.max(MIN_TURN_SEC, Math.round(sec)));
     this.turnTimeLimitMs = clamped * 1000;
   }
 
   /** 대기실에서 방장이 턴 제한시간을 바꿀 때 씀 */
-  updateTurnLimit(playerId: string, sec: number) {
+  updateTurnLimit(playerId: string, sec: unknown) {
     const p = this.players.get(playerId);
     if (!p) throw new Error('UNAUTHORIZED');
     if (!p.isHost) throw new Error('NOT_HOST');
@@ -149,14 +169,15 @@ export class Room {
     this.onChange();
   }
 
-  addPlayer(name: string): { playerId: string; secret: string } {
-    if (this.phase !== 'lobby') throw new Error('ALREADY_STARTED');
+  /** 대기실 또는 게임이 끝난 뒤(다음 판 대기)에만 참가 가능 */
+  addPlayer(name: unknown): { playerId: string; secret: string } {
+    if (this.phase === 'playing') throw new Error('ALREADY_STARTED');
     if (this.players.size >= MAX_PLAYERS) throw new Error('ROOM_FULL');
     const id = crypto.randomUUID();
     const secret = crypto.randomUUID();
     const player: InternalPlayer = {
       id,
-      name: name.slice(0, 20) || '플레이어',
+      name: (typeof name === 'string' ? name.trim().slice(0, 20) : '') || '플레이어',
       secret,
       stack: [],
       playedPile: [],
@@ -170,10 +191,63 @@ export class Room {
     return { playerId: id, secret };
   }
 
+  /** 대기실/게임 종료 화면에서 방을 나감. 방장이 나가면 다음 사람(접속 중인 사람 우선)에게 방장을 넘김 */
+  removePlayer(playerId: string) {
+    const p = this.players.get(playerId);
+    if (!p) throw new Error('UNAUTHORIZED');
+    if (this.phase === 'playing') throw new Error('ALREADY_STARTED');
+    this.players.delete(playerId);
+    this.turnOrder = this.turnOrder.filter((id) => id !== playerId);
+    this.rttSamples.delete(playerId);
+    if (p.isHost) {
+      const next = this.turnOrder.map((id) => this.players.get(id)!);
+      const heir = next.find((pl) => this.isPlayerConnected(pl.id)) ?? next[0];
+      if (heir) heir.isHost = true;
+    }
+    this.reconcileHost();
+    this.onChange();
+  }
+
   auth(playerId: string, secret: string): InternalPlayer {
     const p = this.players.get(playerId);
     if (!p || p.secret !== secret) throw new Error('UNAUTHORIZED');
     return p;
+  }
+
+  /** 서버가 직접 잰 이 사람의 왕복지연(ms) 샘플을 기록 */
+  recordRtt(playerId: string, rtt: number) {
+    if (!this.players.has(playerId) || !Number.isFinite(rtt) || rtt < 0 || rtt > 5000) return;
+    const samples = [...(this.rttSamples.get(playerId) ?? []), rtt].slice(-RTT_SAMPLES);
+    this.rttSamples.set(playerId, samples);
+  }
+
+  private rttOf(playerId: string): number {
+    const samples = this.rttSamples.get(playerId);
+    return samples?.length ? Math.min(...samples) : 0;
+  }
+
+  /**
+   * 접속 상태가 바뀔 때마다 호출. 방장이 끊겨 있으면 HOST_TRANSFER_MS 뒤에 접속 중인 다음 사람에게 넘기고,
+   * 그 전에 돌아오면 취소함. 넘길 사람이 아무도 접속해 있지 않으면 그대로 두고, 누가 접속하면 다시 예약됨.
+   */
+  reconcileHost() {
+    const host = [...this.players.values()].find((p) => p.isHost);
+    if (!host || this.isPlayerConnected(host.id)) {
+      if (this.hostTimer) clearTimeout(this.hostTimer);
+      this.hostTimer = null;
+      return;
+    }
+    if (this.hostTimer) return;
+    this.hostTimer = setTimeout(() => {
+      this.hostTimer = null;
+      const current = [...this.players.values()].find((p) => p.isHost);
+      if (!current || this.isPlayerConnected(current.id)) return;
+      const heir = this.turnOrder.map((id) => this.players.get(id)!).find((p) => this.isPlayerConnected(p.id));
+      if (!heir) return;
+      current.isHost = false;
+      heir.isHost = true;
+      this.onChange();
+    }, HOST_TRANSFER_MS);
   }
 
   /** 최초 시작뿐 아니라 'ended' 상태에서 방장이 다시 누르면 재시작(재초기화) 용도로도 쓰임 */
@@ -219,6 +293,7 @@ export class Room {
   /**
    * 턴마다 제한시간을 걸어둠 - 시간 안에 안 내면 서버가 대신 뒤집어서 게임이 안 멈추게 함.
    * 지금 차례인 사람이 접속이 끊긴 상태면 최소 시간(MIN_TURN_SEC)만 줌 - 재접속하면 원래 시간으로 복구됨.
+   * 카드가 0장이면 종 칠 기회만 잠깐(OUT_OF_CARDS_GRACE_MS) 준 뒤 탈락.
    */
   private scheduleTurnTimer() {
     if (this.turnTimer) clearTimeout(this.turnTimer);
@@ -226,8 +301,13 @@ export class Room {
       this.turnDeadline = null;
       return;
     }
-    const currentPlayerId = this.turnOrder[this.currentTurnIndex];
-    const limitMs = this.isPlayerConnected(currentPlayerId) ? this.turnTimeLimitMs : MIN_TURN_SEC * 1000;
+    const current = this.players.get(this.turnOrder[this.currentTurnIndex])!;
+    const limitMs =
+      current.stack.length === 0
+        ? OUT_OF_CARDS_GRACE_MS
+        : this.isPlayerConnected(current.id)
+          ? this.turnTimeLimitMs
+          : MIN_TURN_SEC * 1000;
     this.turnDeadline = Date.now() + limitMs;
     this.turnTimer = setTimeout(() => this.onTurnTimeout(), limitMs);
   }
@@ -255,13 +335,21 @@ export class Room {
   }
 
   private onTurnTimeout() {
-    const playerId = this.turnOrder[this.currentTurnIndex];
-    try {
-      this.flip(playerId);
-    } catch {
-      // 종 판정/일시정지 중이라 지금은 못 넘기면 잠시 후 다시 시도
-      this.scheduleTurnTimer();
+    this.turnTimer = null;
+    // 종 판정 중이면 아무것도 안 함 - 판정이 끝나면 결과 표시(일시정지) 후 턴이 새로 시작됨
+    if (this.graceTimer || this.phase !== 'playing' || this.pauseUntil !== null) return;
+    const player = this.players.get(this.turnOrder[this.currentTurnIndex])!;
+    if (player.stack.length > 0) {
+      this.flip(player.id);
+      return;
     }
+    // 카드 0장인 채로 유예시간이 지남 - 탈락
+    player.eliminated = true;
+    if (!this.checkSoleSurvivorWin()) {
+      this.syncTurn(1);
+      this.beginTurn();
+    }
+    this.onChange();
   }
 
   /** 종이 울린 뒤 결과를 보여주는 동안 턴 타이머를 멈춤. 끝나면 다음 사람 턴을 새 카운트로 시작 */
@@ -283,8 +371,8 @@ export class Room {
     this.onChange();
   }
 
-  /** 각자 지금 내놓은(맨 위) 카드만 보고 같은 과일끼리 합산해 정확히 5인지 판정 */
-  private evaluateCondition(): { valid: boolean; fruit: Fruit | null; sum: number } {
+  /** 각자 지금 내놓은(맨 위) 카드만 보고 같은 과일끼리 합산해 정확히 5인 과일을 찾음 */
+  private evaluateCondition(): Fruit | null {
     const sums = new Map<Fruit, number>();
     for (const player of this.players.values()) {
       const top = player.playedPile.at(-1);
@@ -292,45 +380,35 @@ export class Room {
       sums.set(top.fruit, (sums.get(top.fruit) ?? 0) + top.count);
     }
     for (const [fruit, sum] of sums) {
-      if (sum === 5) return { valid: true, fruit, sum };
+      if (sum === 5) return fruit;
     }
-    return { valid: false, fruit: null, sum: 0 };
+    return null;
   }
 
   /** 지금 카드 상태를 시각과 함께 기록. reset이면 이전 판 기록을 버리고 새로 시작 */
   private logCondition(reset = false) {
     if (reset) this.conditionLog = [];
-    this.conditionLog.push({ at: Date.now(), fruit: this.evaluateCondition().fruit });
+    this.conditionLog.push({ at: Date.now(), flipId: this.lastFlip?.resultId ?? 0, fruit: this.evaluateCondition() });
   }
 
-  /** 서버 시각 t에 5를 만족하던 과일(없으면 null). t가 이번 판 시작 전이면 undefined */
-  private fruitAt(t: number): Fruit | null | undefined {
-    let fruit: Fruit | null | undefined;
-    for (const mark of this.conditionLog) {
-      if (mark.at > t) break;
-      fruit = mark.fruit;
-    }
-    return fruit;
+  /** 서버 시각 t에 유효하던 기록의 인덱스 (t는 이번 판 시작 이후여야 함) */
+  private markIndexAt(t: number): number {
+    let idx = 0;
+    this.conditionLog.forEach((mark, i) => {
+      if (mark.at <= t) idx = i;
+    });
+    return idx;
   }
 
-  /**
-   * 다음 턴을 정함. startOffset=1이면 "다음 사람부터"(방금 낸 사람은 건너뜀),
-   * startOffset=0이면 "지금 배정된 사람부터 다시 검증"(카드 이동으로 지금 턴 사람이 0장이 됐을 수도 있으므로).
-   * 카드가 0장인 채로 자기 차례가 오는 사람은 여기서 탈락 처리됨.
-   */
+  /** 다음 턴을 정함. 지금 사람 다음부터 탈락하지 않은 첫 사람 */
   private syncTurn(startOffset: 0 | 1) {
     const n = this.turnOrder.length;
     for (let i = startOffset; i < startOffset + n; i++) {
       const idx = (this.currentTurnIndex + i) % n;
-      const pid = this.turnOrder[idx];
-      const player = this.players.get(pid)!;
-      if (player.eliminated) continue;
-      if (player.stack.length > 0) {
+      if (!this.players.get(this.turnOrder[idx])!.eliminated) {
         this.currentTurnIndex = idx;
         return;
       }
-      player.eliminated = true;
-      if (this.checkSoleSurvivorWin()) return;
     }
   }
 
@@ -373,8 +451,9 @@ export class Room {
   /**
    * 종치기는 도착 즉시 판정하지 않고 모아둠. 최초 도착 후 BELL_WINDOW_MS 뒤에 누른 시각 순으로 한꺼번에 판정해서
    * 서버와 가까운(지연이 적은) 사람이 도착 순서만으로 유리해지지 않게 함.
+   * 정답 여부는 누른 순간 "그 사람 화면에 보이던 카드"(seenFlipId) 기준 - 화면이 늦게 바뀌는 사람도 보이는 대로 치면 됨.
    */
-  bell(playerId: string, correctedServerTime: number) {
+  bell(playerId: string, correctedServerTime: unknown, seenFlipId: unknown) {
     const player = this.players.get(playerId);
     if (!player) throw new Error('UNAUTHORIZED');
     if (player.eliminated) throw new Error('ELIMINATED');
@@ -384,22 +463,37 @@ export class Room {
     player.lastActionAt = now;
 
     // 미래 시각은 불가능, 너무 먼 과거는 조작/동기화 실패로 보고 잘라냄
-    const pressedAt = Number.isFinite(correctedServerTime)
-      ? Math.min(now, Math.max(now - MAX_LAG_MS, correctedServerTime))
-      : now;
-    if (this.fruitAt(pressedAt) === undefined) return; // 이번 판 시작 전(결과 표시 중)에 누른 종이 늦게 도착 - 무시
+    let pressedAt =
+      typeof correctedServerTime === 'number' && Number.isFinite(correctedServerTime)
+        ? Math.min(now, Math.max(now - MAX_LAG_MS, correctedServerTime))
+        : now;
+    if (!this.conditionLog.length || pressedAt < this.conditionLog[0].at) return; // 이번 판 시작 전(결과 표시 중)에 누른 종이 늦게 도착 - 무시
     if (this.pendingBellBuffer.some((b) => b.playerId === playerId)) return; // 한 판정에 한 사람당 한 번만
 
-    this.pendingBellBuffer.push({ playerId, pressedAt });
-    if (!this.graceTimer) this.graceTimer = setTimeout(() => this.resolveBellRound(), BELL_WINDOW_MS);
+    const rtt = Math.min(MAX_LAG_MS, this.rttOf(playerId));
+    const serverIdx = this.markIndexAt(pressedAt);
+    let idx = this.conditionLog.findIndex((m) => m.flipId === seenFlipId);
+    const next = this.conditionLog[idx + 1];
+    // 화면 기준을 못 믿는 경우 서버 기록으로 판정: 모르는 카드 / 누른 시각보다 나중 카드 /
+    // 다음 카드가 나온 지 (왕복지연 + 여유)보다 오래 지나서 이미 화면에 보였어야 하는 경우
+    if (idx === -1 || idx > serverIdx || (next && pressedAt - next.at > rtt + STALE_MARGIN_MS)) idx = serverIdx;
+    const seen = this.conditionLog[idx];
+    // 카드가 화면에 도착하고(단방향 지연) 사람이 반응하기(최소 반응시간)도 전에 눌렀다는 주장은 잘라냄
+    pressedAt = Math.max(pressedAt, seen.at + rtt / 2 + MIN_REACTION_MS);
+
+    this.pendingBellBuffer.push({ playerId, pressedAt, fruit: seen.fruit });
+    if (!this.graceTimer) {
+      this.graceTimer = setTimeout(() => this.resolveBellRound(), BELL_WINDOW_MS);
+      this.onChange(); // "판정 중" 상태를 모두에게 알림 (종소리 즉시 재생 + 카드 내기 막기)
+    }
   }
 
-  /** 페널티 대상의 여유 카드를 다른 사람들에게 1장씩 나눠줌 */
+  /** 페널티 대상의 여유 카드를 (탈락하지 않은) 다른 사람들에게 1장씩 나눠줌 */
   private giveAwayCards(penalizedId: string) {
     const penalized = this.players.get(penalizedId);
     if (!penalized) return;
     for (const otherId of this.turnOrder) {
-      if (otherId === penalizedId) continue;
+      if (otherId === penalizedId || this.players.get(otherId)!.eliminated) continue;
       if (penalized.stack.length === 0) break;
       const card = penalized.stack.shift()!;
       this.players.get(otherId)!.stack.unshift(card);
@@ -417,12 +511,11 @@ export class Room {
       fruit: null,
       at: Date.now(),
     };
-    this.syncTurn(0); // 턴은 종 여부와 무관하게 이미 진행 중이었으므로 지금 배정된 사람만 재검증
-    if (this.phase === 'playing') this.enterResultPause();
+    this.enterResultPause(); // 턴은 종 여부와 무관하게 이미 진행 중이었으므로 그대로 둠
     this.onChange();
   }
 
-  /** 종을 정확히 맞춘 사람 - 모든 사람 앞에 쌓여있던(덮인 것 포함) 카드를 전부 걷어감 */
+  /** 종을 정확히 맞춘 사람 - 모든 사람 앞에 쌓여있던(덮인 것 포함) 카드를 전부 걷어가고 다음 턴은 승자부터 */
   private finishAsWin(winnerId: string, fruit: Fruit) {
     const winner = this.players.get(winnerId)!;
     let taken: Card[] = [];
@@ -448,8 +541,8 @@ export class Room {
       if (this.turnTimer) clearTimeout(this.turnTimer);
       this.turnDeadline = null;
     } else {
-      this.syncTurn(0); // 턴은 이미 계속 진행 중이었으므로 지금 배정된 사람만 재검증
-      if (this.phase === 'playing') this.enterResultPause();
+      this.currentTurnIndex = this.turnOrder.indexOf(winnerId);
+      this.enterResultPause();
     }
     this.onChange();
   }
@@ -461,13 +554,12 @@ export class Room {
     this.pendingBellBuffer = [];
     if (bells.length === 0) return;
 
-    // 각자 누른 그 순간의 카드 상태로 판정 - 그 사이 다른 사람이 카드를 내서 상태가 바뀌었어도 영향 없음
-    const winnerIdx = bells.findIndex((b) => this.fruitAt(b.pressedAt));
+    const winnerIdx = bells.findIndex((b) => b.fruit);
     if (winnerIdx !== -1) {
       const winner = bells[winnerIdx];
       // 정답자보다 먼저 잘못 친 사람만 벌칙(조용히 카드만 이동). 정답자보다 늦게 친 종은 무효
       for (const b of bells.slice(0, winnerIdx)) this.giveAwayCards(b.playerId);
-      this.finishAsWin(winner.playerId, this.fruitAt(winner.pressedAt)!);
+      this.finishAsWin(winner.playerId, winner.fruit!);
       return;
     }
 
@@ -504,6 +596,7 @@ export class Room {
       turnTimeLimitSec: this.turnTimeLimitMs / 1000,
       turnDeadline: this.turnDeadline,
       paused: this.pauseUntil !== null,
+      bellPending: this.graceTimer !== null,
     };
   }
 }

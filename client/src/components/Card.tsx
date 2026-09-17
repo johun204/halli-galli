@@ -1,4 +1,4 @@
-import type { Card as CardType, Fruit } from '../types';
+import type { Card as CardType, Fruit } from '../../../shared/types';
 
 const FRUIT_STYLE: Record<Fruit, { emoji: string; color: string }> = {
   strawberry: { emoji: '🍓', color: '#e6392f' },

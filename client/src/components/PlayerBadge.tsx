@@ -1,4 +1,4 @@
-import type { PublicPlayer } from '../types';
+import type { PublicPlayer } from '../../../shared/types';
 
 export function PlayerBadge({
   player,

@@ -1,3 +1,10 @@
+// 서버(worker)와 클라이언트(client)가 함께 쓰는 타입/상수 - 한쪽만 고치면 어긋나므로 여기서만 정의
+
+export const MAX_PLAYERS = 6;
+export const MIN_TURN_SEC = 5;
+export const MAX_TURN_SEC = 30;
+export const REACTIONS = ['😄', '😛', '😭', '🥱', '😱', '🤬'] as const;
+
 export type Fruit = 'strawberry' | 'lime' | 'banana' | 'plum';
 
 export interface Card {
@@ -55,19 +62,28 @@ export interface RoomPublicState {
   turnDeadline: number | null;
   /** 종이 울린 직후 결과를 보여주며 게임이 잠시 멈춰있는 중인지 */
   paused: boolean;
+  /** 누군가 종을 쳐서 판정을 기다리는 중인지 (최초 도착 후 500ms) */
+  bellPending: boolean;
 }
 
-export type ReactionEmoji = '😄' | '😛' | '😭' | '🥱' | '😱' | '🤬';
+export type ReactionEmoji = (typeof REACTIONS)[number];
 
 // 서버 <-> 클라이언트 웹소켓 메시지 프로토콜
 export type ClientMessage =
   | { type: 'start' }
   | { type: 'flip' }
-  | { type: 'bell'; correctedServerTime: number }
+  /** seenFlipId: 종을 누른 순간 내 화면에 반영돼 있던 마지막 카드(lastFlip.resultId, 없으면 0) */
+  | { type: 'bell'; correctedServerTime: number; seenFlipId: number }
   | { type: 'emoji'; emoji: ReactionEmoji }
-  | { type: 'setTurnLimit'; sec: number };
+  | { type: 'setTurnLimit'; sec: number }
+  | { type: 'leave' }
+  /** 시계 동기화: 클라이언트가 보낸 시각 t를 서버가 pong으로 돌려줌 */
+  | { type: 'ping'; t: number }
+  /** pong을 받자마자 서버 시각 s를 되돌려 보내서 서버가 왕복지연을 직접 잴 수 있게 함 */
+  | { type: 'clockAck'; s: number };
 
 export type ServerMessage =
   | { type: 'state'; room: RoomPublicState }
   | { type: 'error'; error: string }
-  | { type: 'emoji'; id: number; playerId: string; emoji: ReactionEmoji };
+  | { type: 'emoji'; id: number; playerId: string; emoji: ReactionEmoji }
+  | { type: 'pong'; t: number; s: number };

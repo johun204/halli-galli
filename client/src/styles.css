@@ -403,6 +403,20 @@ button {
   transform: translate(-50%, -50%);
 }
 
+/* 누군가 종을 쳐서 판정을 기다리는 동안 종이 흔들림 */
+.table-bell-pending {
+  animation: bell-ring 0.18s ease-in-out infinite alternate;
+}
+
+@keyframes bell-ring {
+  from {
+    transform: translate(-50%, -50%) rotate(-12deg);
+  }
+  to {
+    transform: translate(-50%, -50%) rotate(12deg);
+  }
+}
+
 .seat,
 .play-slot {
   position: absolute;

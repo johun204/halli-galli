@@ -24,6 +24,8 @@ export default defineConfig({
     }),
   ],
   server: {
+    // 서버와 함께 쓰는 ../shared/types.ts를 개발 서버에서도 불러올 수 있게 허용
+    fs: { allow: ['..'] },
     proxy: {
       '/api': {
         target: 'http://localhost:8787',
