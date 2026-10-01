@@ -64,6 +64,8 @@ export interface RoomPublicState {
   paused: boolean;
   /** 누군가 종을 쳐서 판정을 기다리는 중인지 (최초 도착 후 500ms) */
   bellPending: boolean;
+  /** 초대코드 없이 랜덤 매칭으로 모르는 사람도 들어올 수 있는 방인지 (방장이 대기실에서 켜고 끔) */
+  isPublic: boolean;
 }
 
 export type ReactionEmoji = (typeof REACTIONS)[number];
@@ -76,6 +78,7 @@ export type ClientMessage =
   | { type: 'bell'; correctedServerTime: number; seenFlipId: number }
   | { type: 'emoji'; emoji: ReactionEmoji }
   | { type: 'setTurnLimit'; sec: number }
+  | { type: 'setPublic'; isPublic: boolean }
   | { type: 'leave' }
   /** 시계 동기화: 클라이언트가 보낸 시각 t를 서버가 pong으로 돌려줌 */
   | { type: 'ping'; t: number }
@@ -87,3 +90,21 @@ export type ServerMessage =
   | { type: 'error'; error: string }
   | { type: 'emoji'; id: number; playerId: string; emoji: ReactionEmoji }
   | { type: 'pong'; t: number; s: number };
+
+// 랜덤 매칭 웹소켓(/api/match/ws) 프로토콜 - 서버 -> 클라이언트만 있음 (클라이언트는 연결을 끊는 것으로 취소)
+export type MatchServerMessage =
+  /** 아직 매칭 대기 중. waiting = 지금 나를 포함해 매칭을 기다리는 사람 수 */
+  | { type: 'waiting'; waiting: number }
+  /** 방에 들어감 - 이 신원으로 /room/:code 에 접속하면 됨 */
+  | { type: 'matched'; code: string; playerId: string; secret: string }
+  | { type: 'error'; error: string };
+
+/** 방(Room DO) -> 매칭 서버(Matchmaker DO)로 보내는 공개 방 현황. 공개가 아니거나 방이 사라지면 null */
+export interface PublicRoomSummary {
+  code: string;
+  phase: Phase;
+  playerCount: number;
+  connectedCount: number;
+  /** 보낸 시각 - 순서가 뒤바뀌어 도착한 오래된 보고를 버리기 위함 */
+  at: number;
+}

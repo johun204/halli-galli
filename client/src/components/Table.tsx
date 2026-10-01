@@ -62,7 +62,7 @@ export function Table({
       const rad = (angle * Math.PI) / 180;
       map.set(p.id, {
         seat: { x: 50 + 42 * Math.cos(rad), y: 50 + 42 * Math.sin(rad) },
-        card: { x: 50 + 22 * Math.cos(rad), y: 50 + 22 * Math.sin(rad) },
+        card: { x: 50 + 24 * Math.cos(rad), y: 50 + 24 * Math.sin(rad) },
       });
     });
     return map;

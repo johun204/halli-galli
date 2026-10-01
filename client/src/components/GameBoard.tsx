@@ -31,7 +31,7 @@ const ERROR_KO: Record<string, string> = {
   NOT_PLAYING: '게임이 진행 중이 아니에요',
   ROOM_FULL: `방이 가득 찼어요 (최대 ${MAX_PLAYERS}명)`,
   NOT_ENOUGH_PLAYERS: '최소 2명이 있어야 시작할 수 있어요',
-  NOT_HOST: '방장만 시작할 수 있어요',
+  NOT_HOST: '방장만 바꿀 수 있어요',
   ROOM_NOT_FOUND: '존재하지 않는 방이에요',
 };
 
@@ -58,8 +58,21 @@ export function GameBoard({
   onUnreachable: () => void;
   onLeave: () => void;
 }) {
-  const { room, error, connected, unreachable, lastEmoji, me, start, flip, ringBell, sendEmoji, setTurnLimit, leave } =
-    useRoom(code, identity);
+  const {
+    room,
+    error,
+    connected,
+    unreachable,
+    lastEmoji,
+    me,
+    start,
+    flip,
+    ringBell,
+    sendEmoji,
+    setTurnLimit,
+    setPublic,
+    leave,
+  } = useRoom(code, identity);
   // Hooks는 항상 같은 순서로 호출되어야 하므로, 아래의 phase별 조건부 return보다 먼저 호출한다.
   const remaining = useCountdown(room?.turnDeadline ?? null);
   const [myReaction, setMyReaction] = useState<{ id: number; emoji: ReactionEmoji } | null>(null);
@@ -84,6 +97,35 @@ export function GameBoard({
     return () => clearTimeout(t);
   }, [pendingFlip]);
 
+  const playing = room?.phase === 'playing';
+  const meNow = room?.players.find((p) => p.id === me);
+  const myTurnNow = playing && room?.currentTurnPlayerId === me && !meNow?.eliminated;
+  const canFlipNow = !!myTurnNow && !room?.bellPending && !room?.paused && !pendingFlip && (meNow?.cardCount ?? 0) > 0;
+
+  // 내 차례가 오면 짧게 진동 - 화면을 계속 보고 있지 않아도 알 수 있게
+  useEffect(() => {
+    if (myTurnNow && navigator.vibrate) navigator.vibrate([18, 60, 18]);
+  }, [myTurnNow]);
+
+  // 키보드(PC): 스페이스/엔터 = 종, 위 화살표/F = 카드 내기. 최신 상태를 쓰도록 ref로 핸들러를 들고 있음
+  const keyHandlers = useRef({ ring: () => {}, flip: () => {} });
+  useEffect(() => {
+    if (!playing) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.code === 'Space' || e.code === 'Enter') {
+        e.preventDefault();
+        keyHandlers.current.ring();
+      } else if (e.code === 'ArrowUp' || e.code === 'KeyF') {
+        e.preventDefault();
+        keyHandlers.current.flip();
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [playing]);
+
   // 방이 없어졌거나(오래 끊겨서 정리됨) 같은 코드로 완전히 다른 방이 생긴 경우 - 더 기다려도 소용없으니 홈으로
   useEffect(() => {
     if (unreachable) onUnreachable();
@@ -105,18 +147,30 @@ export function GameBoard({
         code={code}
         onStart={start}
         onSetTurnLimit={setTurnLimit}
+        onSetPublic={setPublic}
         onLeave={handleLeave}
         error={error}
       />
     );
   if (room.phase === 'ended')
-    return <EndedScreen room={room} me={me} code={code} onRestart={start} onLeave={handleLeave} error={error} />;
+    return (
+      <EndedScreen
+        room={room}
+        me={me}
+        code={code}
+        onRestart={start}
+        onSetPublic={setPublic}
+        onLeave={handleLeave}
+        error={error}
+      />
+    );
 
   const myPlayer = room.players.find((p) => p.id === me)!;
   const isMyTurn = room.currentTurnPlayerId === me;
   const nameOf = (id: string | null) => room.players.find((p) => p.id === id)?.name ?? '';
 
   function handleFlip() {
+    if (!canFlipNow) return; // 서버 응답 전 연속으로 밀어서 "내 차례 아님" 오류가 나는 걸 막음
     setPendingFlip(true);
     flip();
   }
@@ -128,6 +182,8 @@ export function GameBoard({
     }
     ringBell();
   }
+
+  keyHandlers.current = { ring: handleRing, flip: handleFlip };
 
   function handleEmojiPick(emoji: ReactionEmoji) {
     setMyReaction({ id: ++localEventId, emoji });
@@ -172,12 +228,8 @@ export function GameBoard({
 
       <EmojiPicker onPick={handleEmojiPick} />
 
-      <CardStack
-        cardCount={myPlayer.cardCount}
-        canFlip={isMyTurn && !myPlayer.eliminated && !room.bellPending}
-        onFlip={handleFlip}
-        label="내 카드"
-      />
+      <CardStack cardCount={myPlayer.cardCount} canFlip={canFlipNow} onFlip={handleFlip} label="내 카드" />
+      <div className="keyboard-hint">스페이스: 종 치기 · ↑: 카드 내기</div>
     </div>
   );
 }
@@ -253,6 +305,35 @@ function InviteBox({ code }: { code: string }) {
   );
 }
 
+/** 방 설정: 초대코드 없이 랜덤 매칭으로 모르는 사람이 들어올 수 있게 할지 (방장만 바꿀 수 있음) */
+function PublicToggle({
+  isPublic,
+  isHost,
+  onChange,
+}: {
+  isPublic: boolean;
+  isHost: boolean;
+  onChange: (isPublic: boolean) => void;
+}) {
+  return (
+    <div className="setting-row">
+      <div className="setting-text">
+        <b>모르는 사람 참여 허용</b>
+        <span>{isPublic ? '랜덤 매칭으로 초대코드 없이 들어올 수 있어요' : '초대코드/링크를 아는 사람만 들어올 수 있어요'}</span>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={isPublic}
+        aria-label="모르는 사람 참여 허용"
+        className={`switch ${isPublic ? 'switch-on' : ''}`}
+        disabled={!isHost}
+        onClick={() => onChange(!isPublic)}
+      />
+    </div>
+  );
+}
+
 function PlayerList({ players, me }: { players: PublicPlayer[]; me: string }) {
   return (
     <ul className="waiting-list">
@@ -274,6 +355,7 @@ function WaitingRoom({
   code,
   onStart,
   onSetTurnLimit,
+  onSetPublic,
   onLeave,
   error,
 }: {
@@ -282,6 +364,7 @@ function WaitingRoom({
   code: string;
   onStart: () => void;
   onSetTurnLimit: (sec: number) => void;
+  onSetPublic: (isPublic: boolean) => void;
   onLeave: () => void;
   error: string | null;
 }) {
@@ -308,6 +391,7 @@ function WaitingRoom({
         ) : (
           <p className="gate-hint">턴 제한시간: {room.turnTimeLimitSec}초</p>
         )}
+        <PublicToggle isPublic={room.isPublic} isHost={!!myPlayer?.isHost} onChange={onSetPublic} />
 
         <InviteBox code={code} />
         <PlayerList players={room.players} me={me} />
@@ -345,6 +429,7 @@ function EndedScreen({
   me,
   code,
   onRestart,
+  onSetPublic,
   onLeave,
   error,
 }: {
@@ -352,6 +437,7 @@ function EndedScreen({
   me: string;
   code: string;
   onRestart: () => void;
+  onSetPublic: (isPublic: boolean) => void;
   onLeave: () => void;
   error: string | null;
 }) {
@@ -366,6 +452,7 @@ function EndedScreen({
           {room.winnerId === me ? ' (나) 승리!' : ' 승리!'}
         </p>
         <p className="gate-hint">다음 판에 친구를 더 부를 수 있어요</p>
+        <PublicToggle isPublic={room.isPublic} isHost={!!myPlayer?.isHost} onChange={onSetPublic} />
         <InviteBox code={code} />
         <PlayerList players={room.players} me={me} />
         {myPlayer?.isHost ? (

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Room, MIN_PLAYERS, MAX_PLAYERS, MIN_TURN_SEC, MAX_TURN_SEC, DEFAULT_TURN_SEC } from './game';
 import { buildDeck } from './deck';
+import { pickRoom } from './match-logic';
 import type { Card, Fruit } from '../../shared/types';
 
 // 실제 시간을 기다리지 않도록 setTimeout과 Date를 가짜 시계로 바꿔서 tick()으로 시간을 흘려보냄
@@ -413,4 +414,40 @@ test('게임 종료 후 다시 시작하면 탈락 상태와 카드가 초기화
   assert.equal(state.winnerId, null);
   assert.ok(state.players.every((p) => !p.eliminated));
   assert.equal(state.players.reduce((s, p) => s + p.cardCount, 0), 56);
+});
+
+test('모르는 사람 참여 허용: 방장만 대기실/종료 화면에서 켜고 끌 수 있고, 꺼진 방엔 매칭 참가가 거절됨', () => {
+  const room = new Room('PUB');
+  const host = room.addPlayer('host').playerId;
+  const guest = room.addPlayer('guest').playerId;
+  assert.equal(room.toPublicState(new Set()).isPublic, false, '기본값은 꺼짐');
+  assert.throws(() => room.addPlayer('stranger', true), /NOT_PUBLIC/);
+  assert.throws(() => room.setPublic(guest, true), /NOT_HOST/);
+
+  room.setPublic(host, true);
+  assert.equal(room.toPublicState(new Set()).isPublic, true);
+  room.addPlayer('stranger', true);
+  assert.equal(room.players.size, 3);
+  assert.equal(Room.fromSnapshot(room.toSnapshot()).isPublic, true, '저장/복원돼야 함');
+
+  room.start(host);
+  assert.throws(() => room.setPublic(host, false), /ALREADY_STARTED/);
+  room.destroy();
+});
+
+test('랜덤 매칭 방 고르기: 대기실 우선, 사람 많은 방 먼저, 가득 찬/게임 중/버려진 방 제외', () => {
+  const now = 5_000_000;
+  const r = (code: string, phase: 'lobby' | 'playing' | 'ended', playerCount: number, connectedCount = playerCount) => ({
+    code,
+    phase,
+    playerCount,
+    connectedCount,
+    at: now - 1000,
+  });
+  assert.equal(pickRoom([], now), null);
+  assert.equal(pickRoom([r('A', 'playing', 2), r('B', 'lobby', MAX_PLAYERS), r('C', 'lobby', 2, 0)], now), null);
+  assert.equal(pickRoom([r('A', 'ended', 5), r('B', 'lobby', 2), r('C', 'lobby', 3)], now)?.code, 'C');
+  assert.equal(pickRoom([r('A', 'ended', 2)], now)?.code, 'A', '다음 판 대기 중인 방도 후보');
+  assert.equal(pickRoom([r('C', 'lobby', 1, 0)], now, new Map([['C', now + 1]]))?.code, 'C', '방금 만든 방은 접속 전이어도 후보');
+  assert.equal(pickRoom([{ ...r('A', 'lobby', 2), at: now - 7 * 3600_000 }], now), null, '오래 소식 없는 방 제외');
 });

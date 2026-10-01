@@ -6,11 +6,13 @@
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
-      { "name": "ROOM", "class_name": "RoomDurableObject" }
+      { "name": "ROOM", "class_name": "RoomDurableObject" },
+      { "name": "MATCH", "class_name": "MatchmakerDurableObject" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["RoomDurableObject"] }
+    { "tag": "v1", "new_sqlite_classes": ["RoomDurableObject"] },
+    { "tag": "v2", "new_sqlite_classes": ["MatchmakerDurableObject"] }
   ],
   "assets": {
     "directory": "../client/dist",

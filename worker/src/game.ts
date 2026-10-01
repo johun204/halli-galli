@@ -63,6 +63,7 @@ export interface RoomSnapshot {
   lastFlip: LastFlip | null;
   lastBellResult: BellResult | null;
   turnTimeLimitMs: number;
+  isPublic?: boolean;
 }
 
 export class Room {
@@ -72,6 +73,8 @@ export class Room {
   turnOrder: string[] = [];
   currentTurnIndex = 0;
   winnerId: string | null = null;
+  /** 초대코드 없이 랜덤 매칭으로 들어올 수 있는 방인지 */
+  isPublic = false;
 
   // 이번 판(마지막 종 판정 이후) 카드 상태 변화 기록 - 늦게 도착한 종을 "누른 순간 그 사람 화면" 기준으로 판정하기 위함
   private conditionLog: ConditionMark[] = [];
@@ -119,6 +122,7 @@ export class Room {
     room.lastFlip = snap.lastFlip;
     room.lastBellResult = snap.lastBellResult;
     room.turnTimeLimitMs = snap.turnTimeLimitMs ?? DEFAULT_TURN_SEC * 1000;
+    room.isPublic = snap.isPublic ?? false;
     // ponytail: 하이버네이션 복귀 시 남은 시간을 정확히 복원하진 않고 새 타이머를 시작함
     if (room.phase === 'playing') {
       room.logCondition(true);
@@ -140,6 +144,7 @@ export class Room {
       lastFlip: this.lastFlip,
       lastBellResult: this.lastBellResult,
       turnTimeLimitMs: this.turnTimeLimitMs,
+      isPublic: this.isPublic,
     };
   }
 
@@ -169,8 +174,22 @@ export class Room {
     this.onChange();
   }
 
-  /** 대기실 또는 게임이 끝난 뒤(다음 판 대기)에만 참가 가능 */
-  addPlayer(name: unknown): { playerId: string; secret: string } {
+  /** 대기실/게임 종료 화면에서 방장이 "모르는 사람 참여 허용"을 켜고 끔 */
+  setPublic(playerId: string, isPublic: unknown) {
+    const p = this.players.get(playerId);
+    if (!p) throw new Error('UNAUTHORIZED');
+    if (!p.isHost) throw new Error('NOT_HOST');
+    if (this.phase === 'playing') throw new Error('ALREADY_STARTED');
+    this.isPublic = isPublic === true;
+    this.onChange();
+  }
+
+  /**
+   * 대기실 또는 게임이 끝난 뒤(다음 판 대기)에만 참가 가능.
+   * viaMatch = 랜덤 매칭으로 들어오는 경우 - 방장이 공개를 꺼둔 방이면 거절
+   */
+  addPlayer(name: unknown, viaMatch = false): { playerId: string; secret: string } {
+    if (viaMatch && !this.isPublic) throw new Error('NOT_PUBLIC');
     if (this.phase === 'playing') throw new Error('ALREADY_STARTED');
     if (this.players.size >= MAX_PLAYERS) throw new Error('ROOM_FULL');
     const id = crypto.randomUUID();
@@ -597,6 +616,7 @@ export class Room {
       turnDeadline: this.turnDeadline,
       paused: this.pauseUntil !== null,
       bellPending: this.graceTimer !== null,
+      isPublic: this.isPublic,
     };
   }
 }

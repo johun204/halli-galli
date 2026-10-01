@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { checkRoomStatus, createRoom, joinRoom, type Identity } from './api';
+import { checkRoomStatus, createRoom, joinRoom, startMatching, type Identity } from './api';
 import { GameBoard } from './components/GameBoard';
 import { NameGate } from './components/Lobby';
 import { MAX_PLAYERS } from '../../shared/types';
@@ -12,6 +12,8 @@ const ERROR_KO: Record<string, string> = {
   ROOMS_EXHAUSTED: '지금은 방을 만들 수 없어요. 잠시 후 다시 시도해주세요',
   ROOM_FULL: `방이 가득 찼어요 (최대 ${MAX_PLAYERS}명)`,
   ALREADY_STARTED: '지금 게임 중인 방이에요. 판이 끝나면 들어올 수 있어요',
+  MATCH_FAILED: '매칭에 실패했어요. 잠시 후 다시 시도해주세요',
+  MATCH_DISCONNECTED: '매칭 서버와 연결이 끊겼어요. 다시 시도해주세요',
 };
 
 function useToast() {
@@ -78,8 +80,14 @@ function Home({
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [resumeCode, setResumeCode] = useState<string | null>(null);
+  // 랜덤 매칭 중이면 지금 대기 중인 인원 수(아직 모르면 0), 아니면 null
+  const [matchWaiting, setMatchWaiting] = useState<number | null>(null);
+  const cancelMatchRef = useRef<(() => void) | null>(null);
   const { toast, show } = useToast();
   const nameInputRef = useRef<HTMLInputElement>(null);
+
+  // 화면을 떠나면 매칭 대기열에서도 빠짐
+  useEffect(() => () => cancelMatchRef.current?.(), []);
 
   useEffect(() => {
     if (!pendingToastCode) return;
@@ -138,6 +146,32 @@ function Home({
     }
   }
 
+  function handleRandomMatch() {
+    if (busy || matchWaiting !== null) return;
+    if (!requireName()) return;
+    const trimmed = commitName();
+    setMatchWaiting(0);
+    cancelMatchRef.current = startMatching(trimmed, {
+      onWaiting: (n) => setMatchWaiting(n),
+      onMatched: (roomCode, id) => {
+        cancelMatchRef.current = null;
+        saveIdentity(roomCode, id);
+        navigate(`/room/${roomCode}`);
+      },
+      onError: (err) => {
+        cancelMatchRef.current = null;
+        setMatchWaiting(null);
+        show(new Error(err));
+      },
+    });
+  }
+
+  function cancelRandomMatch() {
+    cancelMatchRef.current?.();
+    cancelMatchRef.current = null;
+    setMatchWaiting(null);
+  }
+
   async function handleJoinByCode() {
     if (busy || code.length !== 4) return;
     if (!requireName()) return;
@@ -178,13 +212,34 @@ function Home({
             placeholder="닉네임"
             value={name}
             maxLength={20}
+            disabled={matchWaiting !== null}
             onChange={(e) => setName(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
           />
 
-          <button className="gate-button" disabled={busy} onClick={handleCreate}>
-            {busy ? '처리 중…' : '방 만들기'}
-          </button>
+          {matchWaiting !== null ? (
+            <div className="matching-box">
+              <div className="matching-spinner" />
+              <p className="matching-title">함께할 사람을 찾는 중…</p>
+              <p className="gate-hint">
+                {matchWaiting > 1
+                  ? `나를 포함해 ${matchWaiting}명이 기다리는 중`
+                  : '참여 가능한 방이 생기거나 다른 사람이 오면 바로 입장해요'}
+              </p>
+              <button className="gate-button gate-button-secondary" onClick={cancelRandomMatch}>
+                매칭 취소
+              </button>
+            </div>
+          ) : (
+            <>
+              <button className="gate-button" disabled={busy} onClick={handleCreate}>
+                {busy ? '처리 중…' : '방 만들기'}
+              </button>
+              <button className="gate-button gate-button-match" disabled={busy} onClick={handleRandomMatch}>
+                🎲 랜덤 매칭
+              </button>
+            </>
+          )}
 
           <div className="code-join">
             <p className="code-join-label">또는 초대코드로 바로 입장</p>
@@ -200,7 +255,7 @@ function Home({
               />
               <button
                 className="gate-button gate-button-secondary code-join-button"
-                disabled={code.length !== 4 || busy}
+                disabled={code.length !== 4 || busy || matchWaiting !== null}
                 onClick={handleJoinByCode}
               >
                 입장

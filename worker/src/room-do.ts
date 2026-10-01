@@ -1,6 +1,13 @@
 import { DurableObject } from 'cloudflare:workers';
 import { Room, type RoomSnapshot } from './game';
-import { REACTIONS, type ClientMessage, type ReactionEmoji, type ServerMessage } from '../../shared/types';
+import { MATCHMAKER_NAME } from './matchmaker';
+import {
+  REACTIONS,
+  type ClientMessage,
+  type PublicRoomSummary,
+  type ReactionEmoji,
+  type ServerMessage,
+} from '../../shared/types';
 
 const STORAGE_KEY = 'room-snapshot';
 const ALLOWED_EMOJI = new Set<string>(REACTIONS);
@@ -13,16 +20,22 @@ interface WsAttachment {
   playerId: string;
 }
 
-export class RoomDurableObject extends DurableObject {
+interface Env {
+  MATCH: DurableObjectNamespace;
+}
+
+export class RoomDurableObject extends DurableObject<Env> {
   private room!: Room;
   private ready: Promise<void>;
   private emojiCounter = 0;
   private lastEmojiAt = new Map<string, number>();
   // getWebSockets()에는 방금 끊긴(또는 나가기로 닫는 중인) 소켓이 잠시 남아있을 수 있어서 따로 표시해 둠
   private closedSockets = new WeakSet<WebSocket>();
+  // 매칭 서버에 마지막으로 알린 공개 방 현황 (바뀔 때만 다시 알림). undefined = 이 인스턴스에서 아직 안 알림
+  private lastRegistryKey: string | undefined;
 
-  constructor(ctx: DurableObjectState, env: unknown) {
-    super(ctx, env as Record<string, unknown>);
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
     this.ready = ctx.blockConcurrencyWhile(async () => {
       const snap = await ctx.storage.get<RoomSnapshot>(STORAGE_KEY);
       this.attachRoom(snap ? Room.fromSnapshot(snap) : new Room(ctx.id.name ?? ''));
@@ -40,6 +53,32 @@ export class RoomDurableObject extends DurableObject {
     this.room.destroy();
     await this.ctx.storage.deleteAll();
     this.attachRoom(new Room(this.room.code));
+    this.syncRegistry();
+  }
+
+  /**
+   * 공개 방(모르는 사람 참여 허용)의 현황을 매칭 서버에 알림. 인원/접속/단계가 바뀔 때만 보냄.
+   * 응답을 기다리지 않음 - 매칭 서버가 이 방에 /join 을 요청하는 중일 수도 있어서 서로 기다리면 안 됨
+   */
+  private syncRegistry() {
+    const connectedCount = this.connectedIds().size;
+    const room = this.room;
+    const summary: Omit<PublicRoomSummary, 'at'> | null =
+      room.isPublic && room.players.size > 0
+        ? { code: room.code, phase: room.phase, playerCount: room.players.size, connectedCount }
+        : null;
+    const key = JSON.stringify(summary);
+    // 처음 알리는데 공개 방도 아니면 굳이 보낼 필요 없음 (매칭 서버는 원래 모름)
+    if (key === this.lastRegistryKey || (this.lastRegistryKey === undefined && summary === null)) return;
+    this.lastRegistryKey = key;
+    const body = JSON.stringify({ code: room.code, summary: summary && { ...summary, at: Date.now() } });
+    const stub = this.env.MATCH.get(this.env.MATCH.idFromName(MATCHMAKER_NAME));
+    this.ctx.waitUntil(
+      stub
+        .fetch('https://do/room-update', { method: 'POST', body, headers: { 'Content-Type': 'application/json' } })
+        .then(() => undefined)
+        .catch(() => undefined),
+    );
   }
 
   private persistAndBroadcast() {
@@ -63,6 +102,7 @@ export class RoomDurableObject extends DurableObject {
   }
 
   private broadcast(json = this.stateMessage()) {
+    this.syncRegistry();
     for (const ws of this.ctx.getWebSockets()) {
       if (this.closedSockets.has(ws)) continue;
       try {
@@ -79,26 +119,30 @@ export class RoomDurableObject extends DurableObject {
 
     if (url.pathname === '/create') {
       const body = await request
-        .json<{ name?: unknown; turnLimitSec?: unknown }>()
-        .catch(() => ({ name: undefined, turnLimitSec: undefined }));
+        .json<{ name?: unknown; turnLimitSec?: unknown; isPublic?: unknown }>()
+        .catch(() => ({ name: undefined, turnLimitSec: undefined, isPublic: undefined }));
       // 본문을 다 읽은 뒤에 확인해야 그 사이 같은 코드로 들어온 다른 생성 요청과 겹치지 않음.
       // 이 코드로 이미 누군가 방을 만든 적 있으면 충돌 - 워커가 다른 코드로 재시도함
       if (this.room.players.size > 0) {
         return Response.json({ error: 'CODE_TAKEN' }, { status: 409 });
       }
       this.room.configureTurnLimit(body.turnLimitSec);
+      this.room.isPublic = body.isPublic === true;
       const { playerId, secret } = this.room.addPlayer(body.name);
       return Response.json({ playerId, secret, room: this.room.toPublicState(this.connectedIds()) });
     }
 
     if (url.pathname === '/join') {
-      const body = await request.json<{ name?: unknown }>().catch(() => ({ name: undefined }));
+      // viaMatch: 랜덤 매칭으로 들어오는 요청 - 공개 방이 아니면 거절됨 (클라이언트가 붙여도 제한만 늘어날 뿐이라 안전)
+      const body = await request
+        .json<{ name?: unknown; viaMatch?: unknown }>()
+        .catch(() => ({ name: undefined, viaMatch: undefined }));
       // 아무도 만든 적 없는 코드 = 존재하지 않는 방
       if (this.room.players.size === 0) {
         return Response.json({ error: 'ROOM_NOT_FOUND' }, { status: 404 });
       }
       try {
-        const { playerId, secret } = this.room.addPlayer(body.name);
+        const { playerId, secret } = this.room.addPlayer(body.name, body.viaMatch === true);
         return Response.json({ playerId, secret, room: this.room.toPublicState(this.connectedIds()) });
       } catch (err) {
         return Response.json({ error: err instanceof Error ? err.message : 'ERROR' }, { status: 409 });
@@ -192,6 +236,7 @@ export class RoomDurableObject extends DurableObject {
       else if (parsed.type === 'flip') this.room.flip(info.playerId);
       else if (parsed.type === 'bell') this.room.bell(info.playerId, parsed.correctedServerTime, parsed.seenFlipId);
       else if (parsed.type === 'setTurnLimit') this.room.updateTurnLimit(info.playerId, parsed.sec);
+      else if (parsed.type === 'setPublic') this.room.setPublic(info.playerId, parsed.isPublic);
       else if (parsed.type === 'leave') await this.leave(ws, info.playerId);
     } catch (err) {
       const msg: ServerMessage = { type: 'error', error: err instanceof Error ? err.message : 'ERROR' };
