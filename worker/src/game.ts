@@ -7,8 +7,13 @@ export const MIN_PLAYERS = 2;
 export const DEFAULT_TURN_SEC = 10;
 const DECK_SIZE = buildDeck().length;
 
-// 최초로 도착한 종으로부터 이만큼 기다렸다가, 모인 종들을 "실제로 누른 시각(서버 기준 보정)" 순으로 판정
+// 최초로 도착한 종으로부터 최소 이만큼 기다렸다가 모인 종들을 한꺼번에 판정
 const BELL_WINDOW_MS = 500;
+// 느린 사람은 카드가 늦게 오고(단방향) 종도 늦게 도착(단방향) = 왕복지연만큼 더 늦음. 그만큼 더 기다려주되 이 이상은 안 기다림
+const BELL_WINDOW_MAX_MS = 1500;
+// 반응시간 하한을 계산할 때 봐주는 여유 (화면 그리기 + 네트워크 흔들림).
+// 종이 서버에 도착한 시각은 조작할 수 없으므로: 반응시간 >= (도착 - 카드가 나온 시각) - 왕복지연 - 이만큼
+const SHOWN_MARGIN_MS = 80;
 // 클라이언트가 보낸 보정 시각은 도착 시각 기준 최대 1초 전까지만 믿음(시계 조작/동기화 실패 방어)
 const MAX_LAG_MS = 1000;
 // ponytail: 사람이 카드를 보고 종을 치기까지 걸리는 최소 시간을 고정값으로 가정. 이보다 빨리 눌렀다는 주장은 잘라냄(조작 방지)
@@ -41,6 +46,8 @@ interface PendingBell {
   pressedAt: number;
   /** 누른 순간 그 사람 화면의 카드 상태에서 5를 만족하던 과일 (없으면 null = 오답) */
   fruit: Fruit | null;
+  /** 정답일 때: 그 사람 화면에 5가 처음 보인 순간부터 종을 누르기까지 걸린 시간(ms). 오답이면 Infinity */
+  reactionMs: number;
 }
 
 /** 카드 상태가 바뀐 시점 기록. flipId = 그 시점의 lastFlip.resultId (클라이언트가 보낸 seenFlipId와 맞춰봄) */
@@ -468,11 +475,13 @@ export class Room {
   }
 
   /**
-   * 종치기는 도착 즉시 판정하지 않고 모아둠. 최초 도착 후 BELL_WINDOW_MS 뒤에 누른 시각 순으로 한꺼번에 판정해서
-   * 서버와 가까운(지연이 적은) 사람이 도착 순서만으로 유리해지지 않게 함.
-   * 정답 여부는 누른 순간 "그 사람 화면에 보이던 카드"(seenFlipId) 기준 - 화면이 늦게 바뀌는 사람도 보이는 대로 치면 됨.
+   * 종치기는 도착 즉시 판정하지 않고 모아둠. 최초 도착 후 판정 창(기본 500ms + 가장 느린 사람의 왕복지연) 동안 모은 뒤 한꺼번에 판정.
+   * - 정답 여부: 누른 순간 "그 사람 화면에 보이던 카드"(seenFlipId) 기준 - 화면이 늦게 바뀌는 사람도 보이는 대로 치면 됨
+   * - 정답자끼리의 승부: 각자 화면에 5가 처음 보인 순간부터 누르기까지의 반응시간(shownAgoMs) - 인터넷이 느려서
+   *   카드가 늦게 보인 사람도 반응만 빠르면 이김. 같은 기기 안에서 잰 시간 차이라 시계 오차와 무관함.
+   *   단, 서버가 직접 잰 왕복지연으로 "그때쯤엔 이미 보였어야 하는 시각" 이후로는 못 늦춰서 반응시간을 부풀려 줄일 수 없음.
    */
-  bell(playerId: string, correctedServerTime: unknown, seenFlipId: unknown) {
+  bell(playerId: string, correctedServerTime: unknown, seenFlipId: unknown, shownAgoMs?: unknown) {
     const player = this.players.get(playerId);
     if (!player) throw new Error('UNAUTHORIZED');
     if (player.eliminated) throw new Error('ELIMINATED');
@@ -500,11 +509,41 @@ export class Room {
     // 카드가 화면에 도착하고(단방향 지연) 사람이 반응하기(최소 반응시간)도 전에 눌렀다는 주장은 잘라냄
     pressedAt = Math.max(pressedAt, seen.at + rtt / 2 + MIN_REACTION_MS);
 
-    this.pendingBellBuffer.push({ playerId, pressedAt, fruit: seen.fruit });
+    const reactionMs = seen.fruit ? this.reactionTime(idx, pressedAt, now, rtt, shownAgoMs) : Infinity;
+    this.pendingBellBuffer.push({ playerId, pressedAt, fruit: seen.fruit, reactionMs });
     if (!this.graceTimer) {
-      this.graceTimer = setTimeout(() => this.resolveBellRound(), BELL_WINDOW_MS);
+      this.graceTimer = setTimeout(() => this.resolveBellRound(), this.bellWindowMs());
       this.onChange(); // "판정 중" 상태를 모두에게 알림 (종소리 즉시 재생 + 카드 내기 막기)
     }
+  }
+
+  /**
+   * 정답 종의 반응시간 = 그 사람 화면에 "5인 상태"가 처음 보인 순간 ~ 종을 누른 순간.
+   * 5인 상태가 여러 장에 걸쳐 이어졌다면(다른 과일 카드가 나와도 계속 5) 그 구간을 처음 만든 카드부터 잼.
+   * 클라이언트가 보낸 값은 다음 범위 안으로 자름 (조작 방지):
+   * - 상한: 카드가 서버에 나온 뒤 누른 시각까지 (그보다 오래 걸렸다고 할 이유가 없음)
+   * - 하한: 종이 서버에 실제로 도착한 시각 - 카드가 나온 시각 - 왕복지연(카드가 가고 종이 오는 시간) - 여유
+   */
+  private reactionTime(seenIdx: number, pressedAt: number, arrivedAt: number, rtt: number, shownAgoMs: unknown): number {
+    let start = seenIdx;
+    while (start > 0 && this.conditionLog[start - 1].fruit) start--;
+    const mark = this.conditionLog[start];
+    const sinceCard = Math.max(MIN_REACTION_MS, pressedAt - mark.at);
+    const floor = Math.min(sinceCard, Math.max(MIN_REACTION_MS, arrivedAt - mark.at - rtt - SHOWN_MARGIN_MS));
+    const claimed =
+      shownAgoMs && typeof shownAgoMs === 'object' ? (shownAgoMs as Record<string, unknown>)[String(mark.flipId)] : undefined;
+    // 화면 기록이 없으면(재접속 직후 등) 카드가 단방향 지연만큼 늦게 보였다고 추정
+    const reported = typeof claimed === 'number' && Number.isFinite(claimed) ? claimed : sinceCard - rtt / 2;
+    return Math.min(sinceCard, Math.max(floor, reported));
+  }
+
+  /** 판정 창 길이 - 아직 게임 중인 사람 중 가장 느린 사람의 종이 도착할 때까지 기다림 */
+  private bellWindowMs(): number {
+    let maxRtt = 0;
+    for (const p of this.players.values()) {
+      if (!p.eliminated && this.isPlayerConnected(p.id)) maxRtt = Math.max(maxRtt, this.rttOf(p.id));
+    }
+    return Math.min(BELL_WINDOW_MAX_MS, BELL_WINDOW_MS + maxRtt);
   }
 
   /** 페널티 대상의 여유 카드를 (탈락하지 않은) 다른 사람들에게 1장씩 나눠줌 */
@@ -573,11 +612,14 @@ export class Room {
     this.pendingBellBuffer = [];
     if (bells.length === 0) return;
 
-    const winnerIdx = bells.findIndex((b) => b.fruit);
-    if (winnerIdx !== -1) {
-      const winner = bells[winnerIdx];
+    // 정답자 중에서는 반응시간이 가장 짧은 사람이 이김 (같으면 먼저 누른 사람 - 정렬 순서 유지)
+    const winner = bells.reduce<PendingBell | null>(
+      (best, b) => (b.fruit && (!best || b.reactionMs < best.reactionMs) ? b : best),
+      null,
+    );
+    if (winner) {
       // 정답자보다 먼저 잘못 친 사람만 벌칙(조용히 카드만 이동). 정답자보다 늦게 친 종은 무효
-      for (const b of bells.slice(0, winnerIdx)) this.giveAwayCards(b.playerId);
+      for (const b of bells) if (!b.fruit && b.pressedAt < winner.pressedAt) this.giveAwayCards(b.playerId);
       this.finishAsWin(winner.playerId, winner.fruit!);
       return;
     }

@@ -271,7 +271,7 @@ test('지연 보정: 내 화면에 5가 보일 때 쳤다면, 서버에서 이�
     t.room.flip(guest); // lime 1 -> 서버에서는 합 6으로 깨짐
     tick(150);
     t.room.bell(host, Date.now(), seen); // host 화면은 아직 lime 5 상태
-    tick(500);
+    tick(500 + rtt); // 판정 창 = 500ms + 가장 느린 사람의 왕복지연
     return t.state().lastBellResult;
   };
   assert.equal(run(250)?.winnerId !== null, true, '왕복 250ms면 150ms 전에 바뀐 카드는 아직 못 봤을 수 있음 -> 정답');
@@ -288,16 +288,18 @@ test('지연 보정: 1초보다 더 과거라고 주장하는 종은 잘라내�
   assert.equal(state().lastBellResult?.winnerId, ids[0]);
 });
 
-test('조작 방지: 카드가 나오자마자 눌렀다고 주장해도 (단방향 지연 + 최소 반응시간) 이전으로는 인정 안 됨', () => {
+test('조작 방지: 카드가 나오자마자 눌렀다고 주장해도, 종이 도착한 시각 기준(- 왕복지연 - 여유) 이하로는 인정 안 됨', () => {
   const { room, ids, state, flipId } = setup([[...filler(1), card('plum', 5)], filler(2)]);
   const [cheater, honest] = ids;
   room.recordRtt(cheater, 100);
   room.flip(cheater);
   const flippedAt = Date.now();
-  tick(300);
-  room.bell(cheater, flippedAt + 1, flipId()); // 1ms 만에 눌렀다고 주장 -> flippedAt + 50 + 80 으로 잘림
-  room.bell(honest, flippedAt + 120, flipId());
-  tick(500);
+  tick(120);
+  room.bell(honest, flippedAt + 120, flipId()); // 지연 없이 120ms 반응, 바로 도착
+  tick(200);
+  // 320ms에 도착했는데 1ms 만에 눌렀다고 주장 -> 최소 320 - 100 - 80 = 140ms 반응으로 인정
+  room.bell(cheater, flippedAt + 1, flipId(), { [flipId()]: 1 });
+  tick(700);
   assert.equal(state().lastBellResult?.winnerId, honest);
 });
 
@@ -450,4 +452,76 @@ test('랜덤 매칭 방 고르기: 대기실 우선, 사람 많은 방 먼저, �
   assert.equal(pickRoom([r('A', 'ended', 2)], now)?.code, 'A', '다음 판 대기 중인 방도 후보');
   assert.equal(pickRoom([r('C', 'lobby', 1, 0)], now, new Map([['C', now + 1]]))?.code, 'C', '방금 만든 방은 접속 전이어도 후보');
   assert.equal(pickRoom([{ ...r('A', 'lobby', 2), at: now - 7 * 3600_000 }], now), null, '오래 소식 없는 방 제외');
+});
+
+test('느린 인터넷: 카드가 늦게 보였어도, 화면에 보인 뒤 더 빨리 반응한 사람이 이긴다', () => {
+  const { room, ids, state, flipId } = setup([[...filler(1), card('banana', 5)], filler(2)]);
+  const [fast, slow] = ids;
+  room.recordRtt(fast, 10);
+  room.recordRtt(slow, 600); // 단방향 300ms - 카드가 300ms 늦게 보임
+  room.flip(fast); // 바나나 5
+  const seen = flipId();
+  const flippedAt = Date.now();
+
+  tick(400);
+  room.bell(fast, Date.now(), seen, { [seen]: 395 }); // 바로 보고 395ms 만에 누름
+  tick(250);
+  // 느린 사람: 300ms 뒤에 보고 350ms 만에 누름 -> 서버 시각으로는 더 늦게 눌렀지만 반응은 더 빠름
+  room.bell(slow, flippedAt + 650, seen, { [seen]: 350 });
+  assert.equal(state().bellPending, true);
+  tick(1200);
+  assert.equal(state().lastBellResult?.winnerId, slow);
+});
+
+test('판정 창은 가장 느린 사람의 왕복지연만큼 늘어나서, 늦게 도착한 정답 종도 포함된다 (최대 1.5초)', () => {
+  const { room, ids, state, flipId } = setup([[...filler(1), card('plum', 5)], filler(2)]);
+  const [fast, slow] = ids;
+  room.recordRtt(slow, 700);
+  room.flip(fast);
+  const seen = flipId();
+  tick(300);
+  room.bell(fast, Date.now(), seen, { [seen]: 300 });
+  // 느린 사람: 350ms에 카드가 보이고 200ms 만에 누름(550) -> 900ms에 도착.
+  tick(600); // 고정 500ms 창이었다면 800ms에 이미 판정이 끝나 이 종은 버려졌을 것
+  assert.equal(state().bellPending, true, '느린 사람 왕복지연만큼 더 기다려야 함');
+  room.bell(slow, Date.now() - 350, seen, { [seen]: 200 });
+  tick(700);
+  assert.equal(state().lastBellResult?.winnerId, slow);
+});
+
+test('조작 방지: 카드가 늦게 보였다고 거짓말해도 (종 도착 시각 - 왕복지연 - 여유)보다 짧은 반응은 인정 안 됨', () => {
+  const { room, ids, state, flipId } = setup([[...filler(1), card('lime', 5)], filler(2)]);
+  const [cheater, honest] = ids;
+  room.recordRtt(cheater, 50);
+  room.recordRtt(honest, 50);
+  room.flip(cheater);
+  const seen = flipId();
+  const flippedAt = Date.now();
+  // honest: 25ms 뒤에 보고 300ms 만에 누름(325) -> 350에 도착
+  tick(350);
+  room.bell(honest, flippedAt + 325, seen, { [seen]: 300 });
+  // cheater: 실제로는 475에 눌러 500에 도착했는데 "100ms 전에 보였다"고 주장 -> 최소 500 - 50 - 80 = 370ms로 인정
+  tick(150);
+  room.bell(cheater, flippedAt + 475, seen, { [seen]: 100 });
+  tick(700);
+  assert.equal(state().lastBellResult?.winnerId, honest);
+});
+
+test('5인 상태가 여러 장에 걸쳐 이어지면 처음 5가 된 카드부터 반응시간을 잰다', () => {
+  const { room, ids, state, flipId } = setup([
+    [...filler(1), card('strawberry', 5)],
+    [...filler(1), card('banana', 2)],
+  ]);
+  const [a, b] = ids;
+  room.flip(a); // 딸기 5 (정답 시작)
+  const first = flipId();
+  tick(300);
+  room.flip(b); // 바나나 2 - 딸기는 여전히 5
+  const second = flipId();
+  tick(100);
+  // b는 두 번째 카드가 보이고 50ms 만에 눌렀다고 해도, 5는 첫 카드부터 이미 보였으므로 그 기준(~400ms)으로 잼
+  room.bell(b, Date.now(), second, { [second]: 50, [first]: 390 });
+  room.bell(a, Date.now() - 20, first, { [first]: 380 });
+  tick(600);
+  assert.equal(state().lastBellResult?.winnerId, a);
 });

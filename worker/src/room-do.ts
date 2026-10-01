@@ -234,7 +234,7 @@ export class RoomDurableObject extends DurableObject<Env> {
     try {
       if (parsed.type === 'start') this.room.start(info.playerId);
       else if (parsed.type === 'flip') this.room.flip(info.playerId);
-      else if (parsed.type === 'bell') this.room.bell(info.playerId, parsed.correctedServerTime, parsed.seenFlipId);
+      else if (parsed.type === 'bell') this.room.bell(info.playerId, parsed.correctedServerTime, parsed.seenFlipId, parsed.shownAgoMs);
       else if (parsed.type === 'setTurnLimit') this.room.updateTurnLimit(info.playerId, parsed.sec);
       else if (parsed.type === 'setPublic') this.room.setPublic(info.playerId, parsed.isPublic);
       else if (parsed.type === 'leave') await this.leave(ws, info.playerId);

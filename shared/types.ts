@@ -74,8 +74,11 @@ export type ReactionEmoji = (typeof REACTIONS)[number];
 export type ClientMessage =
   | { type: 'start' }
   | { type: 'flip' }
-  /** seenFlipId: 종을 누른 순간 내 화면에 반영돼 있던 마지막 카드(lastFlip.resultId, 없으면 0) */
-  | { type: 'bell'; correctedServerTime: number; seenFlipId: number }
+  /**
+   * seenFlipId: 종을 누른 순간 내 화면에 반영돼 있던 마지막 카드(lastFlip.resultId, 없으면 0)
+   * shownAgoMs: 최근 카드들이 내 화면에 그려진 지 몇 ms 지났는지 { [flipId]: ms } - 반응시간 판정용 (기기 안에서 잰 값이라 시계 오차 없음)
+   */
+  | { type: 'bell'; correctedServerTime: number; seenFlipId: number; shownAgoMs?: Record<string, number> }
   | { type: 'emoji'; emoji: ReactionEmoji }
   | { type: 'setTurnLimit'; sec: number }
   | { type: 'setPublic'; isPublic: boolean }

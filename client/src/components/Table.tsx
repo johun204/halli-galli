@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { EmojiEvent } from '../hooks/useRoom';
 import type { BellResult, PublicPlayer, ReactionEmoji } from '../../../shared/types';
 import { Bell } from './Bell';
-import { CardBack, CardFace } from './Card';
+import { FlipCard } from './Card';
 import { PlayerBadge } from './PlayerBadge';
 
 const FLIGHT_MS = 550;
@@ -152,18 +152,14 @@ export function Table({
                 )}
               </div>
               <div className="play-slot" style={{ left: `${pos.card.x}%`, top: `${pos.card.y}%` }}>
-                {showFlipping ? (
-                  // 서버 응답을 기다리는 동안 카드 자리를 비워두지 않고 뒤집는 중 표시를 보여줌 (끊김 방지)
-                  <div className="play-slot-card flip-in">
-                    <CardBack />
-                  </div>
-                ) : p.playedTop ? (
+                {showFlipping || p.playedTop ? (
                   <div className="play-slot-stack">
-                    {Array.from({ length: thickness - 1 }).map((_, i) => (
+                    {Array.from({ length: Math.max(0, (showFlipping ? thickness : thickness - 1)) }).map((_, i) => (
                       <div key={i} className="stack-layer play-slot-layer" style={{ transform: `translate(${i * 2}px, ${-i * 2.5}px) scale(0.92)` }} />
                     ))}
-                    <div key={p.playedTop.id} className="play-slot-card flip-in">
-                      <CardFace card={p.playedTop} />
+                    {/* 내가 낸 카드는 서버 응답 전까지 뒷면으로 먼저 놓이고, 응답이 오면 같은 자리에서 그대로 뒤집힘 (끊김 방지) */}
+                    <div key={showFlipping ? 'pending' : p.playedTop!.id} className="play-slot-card">
+                      <FlipCard card={showFlipping ? null : p.playedTop} />
                     </div>
                   </div>
                 ) : (

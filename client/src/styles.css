@@ -288,11 +288,11 @@ button {
 
 .card-face-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 1px;
-  font-size: 15px;
+  grid-template-columns: repeat(3, 18px);
+  grid-template-rows: repeat(3, 24px);
+  font-size: 16px;
+  line-height: 1;
   place-items: center;
-  padding: 4px;
 }
 
 .card-face-count {
@@ -323,19 +323,102 @@ button {
   opacity: 0.85;
 }
 
-.flip-in {
-  animation: flip-in 0.32s ease-out;
-  transform-style: preserve-3d;
+/* ---------- 카드 3D 뒤집기: 뒷면으로 나왔다가 아래쪽으로 넘어가며 앞면이 펼쳐짐 ---------- */
+
+.flip3d {
+  position: relative;
+  width: 72px;
+  height: 100px;
+  perspective: 520px;
+  perspective-origin: 50% 20%;
 }
 
-@keyframes flip-in {
+.flip3d-inner {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  transform-origin: 50% 50%;
+  z-index: 1;
+}
+
+.flip3d-side {
+  position: absolute;
+  inset: 0;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
+.flip3d-back {
+  transform: rotateX(180deg);
+}
+
+/* 서버 응답 대기: 뒷면이 살짝 떠서 내려앉음 */
+.flip3d-waiting {
+  transform: rotateX(180deg);
+  animation: card-land 0.18s ease-out;
+}
+
+@keyframes card-land {
+  from {
+    transform: rotateX(180deg) translateY(10px) scale(1.08);
+    opacity: 0.6;
+  }
+}
+
+/* 뒷면(180°)에서 시작해 위 모서리가 앞으로 넘어오며 아래로 뒤집혀 앞면(0°)이 됨. 끝에 살짝 튕기며 안착 */
+.flip3d-reveal {
+  animation: card-flip-down 0.46s cubic-bezier(0.3, 0.7, 0.3, 1) both;
+}
+
+@keyframes card-flip-down {
   0% {
-    transform: rotateY(100deg) scale(0.85);
-    opacity: 0.4;
+    transform: translateY(-6px) translateZ(18px) rotateX(180deg) scale(1.04);
+  }
+  45% {
+    transform: translateY(-10px) translateZ(36px) rotateX(95deg) scale(1.08);
+  }
+  80% {
+    transform: translateY(1px) translateZ(4px) rotateX(-8deg) scale(1);
   }
   100% {
-    transform: rotateY(0deg) scale(1);
-    opacity: 1;
+    transform: translateY(0) translateZ(0) rotateX(0deg) scale(1);
+  }
+}
+
+/* 카드가 들렸다가 내려앉는 동안 테이블에 생기는 그림자 */
+.flip3d-shadow {
+  position: absolute;
+  left: 8%;
+  right: 8%;
+  bottom: -6px;
+  height: 14px;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(0, 0, 0, 0.22), rgba(0, 0, 0, 0));
+  opacity: 0;
+}
+
+.flip3d-shadow-reveal {
+  animation: card-flip-shadow 0.46s ease-out;
+}
+
+@keyframes card-flip-shadow {
+  0% {
+    opacity: 0.3;
+  }
+  45% {
+    opacity: 0.6;
+    transform: scale(0.75);
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flip3d-reveal,
+  .flip3d-waiting,
+  .flip3d-shadow-reveal {
+    animation-duration: 0.01s;
   }
 }
 

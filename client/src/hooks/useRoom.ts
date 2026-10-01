@@ -9,6 +9,8 @@ const PING_BURST_MS = 300;
 const PING_INTERVAL_MS = 3000;
 // 서버 오류 문구는 이만큼 보여주고 자동으로 내림
 const ERROR_SHOW_MS = 2200;
+// 카드가 화면에 그려진 시각을 최근 몇 장까지 기억할지 (종 판정 때 반응시간 계산용)
+const SHOWN_HISTORY = 12;
 
 export interface EmojiEvent {
   id: number;
@@ -25,6 +27,25 @@ export function useRoom(code: string, identity: Identity) {
   const [unreachable, setUnreachable] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const errorTimer = useRef<ReturnType<typeof setTimeout>>();
+  // flipId -> 그 카드가 이 화면에 실제로 그려진 시각(performance.now). 느린 인터넷이어도 "내 화면에 보인 뒤" 반응시간으로 판정받기 위함
+  const shownAt = useRef(new Map<number, number>());
+
+  function recordShown(flipId: number | undefined) {
+    if (!flipId || shownAt.current.has(flipId)) return;
+    // 새 상태가 그려지는 다음 프레임 시각을 기록 (탭이 백그라운드면 기록 안 됨 -> 서버가 추정치 사용)
+    requestAnimationFrame(() => {
+      if (shownAt.current.has(flipId)) return;
+      shownAt.current.set(flipId, performance.now());
+      while (shownAt.current.size > SHOWN_HISTORY) shownAt.current.delete(shownAt.current.keys().next().value!);
+    });
+  }
+
+  function shownAgoMs(): Record<string, number> {
+    const now = performance.now();
+    const out: Record<string, number> = {};
+    for (const [flipId, t] of shownAt.current) out[flipId] = Math.round(now - t);
+    return out;
+  }
 
   function showError(code: string) {
     setError(code);
@@ -62,6 +83,7 @@ export function useRoom(code: string, identity: Identity) {
         }
         if (msg.type === 'state') {
           setRoom(msg.room);
+          recordShown(msg.room.lastFlip?.resultId);
         } else if (msg.type === 'error') {
           showError(msg.error);
         } else if (msg.type === 'emoji') {
@@ -132,7 +154,13 @@ export function useRoom(code: string, identity: Identity) {
     start: () => send({ type: 'start' }),
     flip: () => send({ type: 'flip' }),
     // seenFlipId: 지금 화면에 반영된 마지막 카드 - 서버가 "내 화면 기준"으로 정답 여부를 판정함
-    ringBell: () => send({ type: 'bell', correctedServerTime: correctedNow(), seenFlipId: room?.lastFlip?.resultId ?? 0 }),
+    ringBell: () =>
+      send({
+        type: 'bell',
+        correctedServerTime: correctedNow(),
+        seenFlipId: room?.lastFlip?.resultId ?? 0,
+        shownAgoMs: shownAgoMs(),
+      }),
     sendEmoji: (emoji: ReactionEmoji) => send({ type: 'emoji', emoji }),
     setTurnLimit: (sec: number) => send({ type: 'setTurnLimit', sec }),
     setPublic: (isPublic: boolean) => send({ type: 'setPublic', isPublic }),
