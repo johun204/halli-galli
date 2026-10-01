@@ -3,6 +3,29 @@
 // 멈추게 만들지만, AudioContext는 기본적으로 다른 소리와 "믹싱"되어 음악을 방해하지 않기 때문.
 let ctx: AudioContext | null = null;
 
+const MUTED_KEY = 'halligalli:muted';
+let muted = (() => {
+  try {
+    return localStorage.getItem(MUTED_KEY) === '1';
+  } catch {
+    return false;
+  }
+})();
+
+export function isMuted() {
+  return muted;
+}
+
+/** 소리 끄기/켜기 - 다음 방문에도 유지 */
+export function setMuted(next: boolean) {
+  muted = next;
+  try {
+    localStorage.setItem(MUTED_KEY, next ? '1' : '0');
+  } catch {
+    // 저장이 막힌 브라우저(사생활 보호 모드 등) - 이번 방문 동안만 적용
+  }
+}
+
 /** 페이지 첫 사용자 상호작용 시 한 번 호출 - 브라우저 자동재생 정책 때문에 필요 */
 export function unlockAudio() {
   if (ctx) return;
@@ -12,7 +35,7 @@ export function unlockAudio() {
 }
 
 export function playBellSound() {
-  if (!ctx) return;
+  if (!ctx || muted) return;
   if (ctx.state === 'suspended') ctx.resume();
   const now = ctx.currentTime;
   const partials: [number, number][] = [

@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { correctedNow, type Identity } from '../api';
 import { useRoom } from '../hooks/useRoom';
-import { playBellSound } from '../sound';
-import { MAX_PLAYERS, MAX_TURN_SEC, MIN_TURN_SEC, REACTIONS } from '../../../shared/types';
-import type { Fruit, PublicPlayer, ReactionEmoji, RoomPublicState } from '../../../shared/types';
+import { FRUIT_KO, GAME_ERROR_KO } from '../messages';
+import { isMuted, playBellSound, setMuted } from '../sound';
+import { REACTIONS } from '../../../shared/types';
+import type { ReactionEmoji, RoomPublicState } from '../../../shared/types';
 import { CardStack } from './CardStack';
-import { QrCode } from './QrCode';
+import { EndedScreen, WaitingRoom } from './RoomLobby';
+import { RulesSheet } from './Rules';
 import { Table } from './Table';
 
 /** 서버가 보내준 턴 마감 시각을 기준으로 로컬에서 매초 카운트다운 표시 */
@@ -23,24 +25,6 @@ function useCountdown(deadline: number | null): number | null {
   }, [deadline]);
   return remaining;
 }
-
-// BELL_WINDOW_OPEN / GAME_PAUSED / ELIMINATED는 일부러 문구를 안 보여줌
-const ERROR_KO: Record<string, string> = {
-  NOT_YOUR_TURN: '아직 내 차례가 아니에요',
-  NO_CARDS: '남은 카드가 없어요',
-  NOT_PLAYING: '게임이 진행 중이 아니에요',
-  ROOM_FULL: `방이 가득 찼어요 (최대 ${MAX_PLAYERS}명)`,
-  NOT_ENOUGH_PLAYERS: '최소 2명이 있어야 시작할 수 있어요',
-  NOT_HOST: '방장만 바꿀 수 있어요',
-  ROOM_NOT_FOUND: '존재하지 않는 방이에요',
-};
-
-const FRUIT_KO: Record<Fruit, string> = {
-  strawberry: '딸기',
-  banana: '바나나',
-  lime: '사과', // 내부 id는 기존 저장 데이터 호환 때문에 유지, 화면 표시는 이모지(🍏)에 맞춤
-  plum: '포도', // 이모지 🍇
-};
 
 // 내가 친 종은 누르는 즉시 소리를 내므로, 서버의 "판정 중" 알림이 이 시간 안에 오면 소리를 또 내지 않음
 const LOCAL_RING_DEDUPE_MS = 1000;
@@ -78,6 +62,8 @@ export function GameBoard({
   const [myReaction, setMyReaction] = useState<{ id: number; emoji: ReactionEmoji } | null>(null);
   const [pendingFlip, setPendingFlip] = useState(false);
   const lastLocalRingAt = useRef(0);
+  const [showRules, setShowRules] = useState(false);
+  const [muted, setMutedState] = useState(isMuted);
 
   // 누군가 종을 치면(판정 대기 시작) 모두에게 바로 종소리 - 실제 게임처럼 결과를 기다리지 않음
   useEffect(() => {
@@ -114,6 +100,7 @@ export function GameBoard({
     function onKey(e: KeyboardEvent) {
       if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (document.querySelector('.sheet')) return; // 게임 방법을 보는 중엔 단축키 무시
       if (e.code === 'Space' || e.code === 'Enter') {
         e.preventDefault();
         keyHandlers.current.ring();
@@ -137,11 +124,22 @@ export function GameBoard({
     onLeave();
   }
 
-  if (unreachable) return <div className="loading">연결 중…</div>;
-  if (!room) return <div className="loading">연결 중…</div>;
+  const reconnectBanner = !connected && room && (
+    <div className="toast-error toast-reconnect">연결이 끊겼어요, 다시 연결하는 중…</div>
+  );
+
+  if (unreachable || !room)
+    return (
+      <div className="loading">
+        <div className="matching-spinner" />
+        방에 연결하는 중…
+      </div>
+    );
   if (room.phase === 'lobby')
     return (
-      <WaitingRoom
+      <>
+        {reconnectBanner}
+        <WaitingRoom
         room={room}
         me={me}
         code={code}
@@ -150,11 +148,14 @@ export function GameBoard({
         onSetPublic={setPublic}
         onLeave={handleLeave}
         error={error}
-      />
+        />
+      </>
     );
   if (room.phase === 'ended')
     return (
-      <EndedScreen
+      <>
+        {reconnectBanner}
+        <EndedScreen
         room={room}
         me={me}
         code={code}
@@ -162,7 +163,8 @@ export function GameBoard({
         onSetPublic={setPublic}
         onLeave={handleLeave}
         error={error}
-      />
+        />
+      </>
     );
 
   const myPlayer = room.players.find((p) => p.id === me)!;
@@ -192,7 +194,26 @@ export function GameBoard({
 
   return (
     <div className="board">
-      {!connected && <div className="toast-error toast-reconnect">연결이 끊겼어요, 다시 연결하는 중…</div>}
+      {reconnectBanner}
+
+      <div className="board-topbar">
+        <span className="room-chip">방 {code}</span>
+        <div className="board-topbar-actions">
+          <button
+            className="icon-button"
+            onClick={() => {
+              setMuted(!muted);
+              setMutedState(!muted);
+            }}
+            aria-label={muted ? '소리 켜기' : '소리 끄기'}
+          >
+            {muted ? '🔇' : '🔊'}
+          </button>
+          <button className="icon-button" onClick={() => setShowRules(true)} aria-label="게임 방법">
+            ?
+          </button>
+        </div>
+      </div>
 
       <Table
         players={room.players}
@@ -209,9 +230,10 @@ export function GameBoard({
       />
 
       {room.paused && room.lastBellResult && <PauseOverlay result={room.lastBellResult} nameOf={nameOf} />}
-      {error && ERROR_KO[error] && <div className="toast-error">{ERROR_KO[error]}</div>}
+      {error && GAME_ERROR_KO[error] && <div className="toast-error">{GAME_ERROR_KO[error]}</div>}
+      {showRules && <RulesSheet onClose={() => setShowRules(false)} />}
 
-      <div className="turn-indicator">
+      <div className={`turn-indicator ${isMyTurn && !myPlayer.eliminated && !room.bellPending ? 'turn-indicator-me' : ''}`}>
         {room.bellPending
           ? '🔔 판정 중…'
           : myPlayer.eliminated
@@ -266,206 +288,6 @@ function PauseOverlay({
             ? `${result.fruit ? FRUIT_KO[result.fruit] : ''} 5개 정답 — ${result.tookCards}장 획득!`
             : '땡, 못 맞췄어요 — 다른 사람들에게 카드 1장씩 나눠줘요'}
         </p>
-      </div>
-    </div>
-  );
-}
-
-/** 초대 QR + 링크 복사/공유 - 대기실과 게임 종료 화면(다음 판 초대)에서 같이 씀 */
-function InviteBox({ code }: { code: string }) {
-  const inviteUrl = `${location.origin}/room/${code}`;
-  const [copied, setCopied] = useState(false);
-  const canShare = typeof navigator.share === 'function';
-
-  function copyLink() {
-    navigator.clipboard.writeText(inviteUrl).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  }
-
-  function shareLink() {
-    navigator.share({ title: '🔔 할리갈리', text: `할리갈리 방 코드 ${code} - 같이 해요!`, url: inviteUrl }).catch(() => {});
-  }
-
-  return (
-    <>
-      <QrCode text={inviteUrl} />
-      <div className="invite-row">
-        <button className="gate-button gate-button-secondary invite-button" onClick={copyLink}>
-          {copied ? '복사됨!' : '초대 링크 복사'}
-        </button>
-        {canShare && (
-          <button className="gate-button gate-button-secondary invite-button" onClick={shareLink}>
-            공유하기
-          </button>
-        )}
-      </div>
-    </>
-  );
-}
-
-/** 방 설정: 초대코드 없이 랜덤 매칭으로 모르는 사람이 들어올 수 있게 할지 (방장만 바꿀 수 있음) */
-function PublicToggle({
-  isPublic,
-  isHost,
-  onChange,
-}: {
-  isPublic: boolean;
-  isHost: boolean;
-  onChange: (isPublic: boolean) => void;
-}) {
-  return (
-    <div className="setting-row">
-      <div className="setting-text">
-        <b>모르는 사람 참여 허용</b>
-        <span>{isPublic ? '랜덤 매칭으로 초대코드 없이 들어올 수 있어요' : '초대코드/링크를 아는 사람만 들어올 수 있어요'}</span>
-      </div>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={isPublic}
-        aria-label="모르는 사람 참여 허용"
-        className={`switch ${isPublic ? 'switch-on' : ''}`}
-        disabled={!isHost}
-        onClick={() => onChange(!isPublic)}
-      />
-    </div>
-  );
-}
-
-function PlayerList({ players, me }: { players: PublicPlayer[]; me: string }) {
-  return (
-    <ul className="waiting-list">
-      {players.map((p) => (
-        <li key={p.id}>
-          <span className={`dot ${p.connected ? 'dot-on' : 'dot-off'}`} />
-          {p.name}
-          {p.isHost ? ' 👑' : ''}
-          {p.id === me ? ' (나)' : ''}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function WaitingRoom({
-  room,
-  me,
-  code,
-  onStart,
-  onSetTurnLimit,
-  onSetPublic,
-  onLeave,
-  error,
-}: {
-  room: RoomPublicState;
-  me: string;
-  code: string;
-  onStart: () => void;
-  onSetTurnLimit: (sec: number) => void;
-  onSetPublic: (isPublic: boolean) => void;
-  onLeave: () => void;
-  error: string | null;
-}) {
-  const myPlayer = room.players.find((p) => p.id === me);
-
-  return (
-    <div className="gate">
-      <div className="gate-card">
-        <h1>🔔 할리갈리</h1>
-        <p className="gate-title">방 코드 {code}</p>
-
-        {myPlayer?.isHost ? (
-          <label className="turn-limit-label">
-            턴 제한시간: <b>{room.turnTimeLimitSec}초</b>
-            <input
-              className="turn-limit-range"
-              type="range"
-              min={MIN_TURN_SEC}
-              max={MAX_TURN_SEC}
-              value={room.turnTimeLimitSec}
-              onChange={(e) => onSetTurnLimit(Number(e.target.value))}
-            />
-          </label>
-        ) : (
-          <p className="gate-hint">턴 제한시간: {room.turnTimeLimitSec}초</p>
-        )}
-        <PublicToggle isPublic={room.isPublic} isHost={!!myPlayer?.isHost} onChange={onSetPublic} />
-
-        <InviteBox code={code} />
-        <PlayerList players={room.players} me={me} />
-        {myPlayer?.isHost ? (
-          <button className="gate-button" disabled={room.players.length < 2} onClick={onStart}>
-            게임 시작 ({room.players.length}/{MAX_PLAYERS})
-          </button>
-        ) : (
-          <p className="gate-hint">방장이 시작하기를 기다리는 중…</p>
-        )}
-        <button className="gate-button gate-button-secondary" onClick={onLeave}>
-          방 나가기
-        </button>
-        {error && ERROR_KO[error] && <div className="toast-error">{ERROR_KO[error]}</div>}
-
-        <details className="rules" open>
-          <summary>게임 방법</summary>
-          <ul>
-            <li>각자 차례가 되면 자기 카드 더미의 맨 위 카드를 뒤집어 자기 자리 앞에 냅니다.</li>
-            <li>새로 내면 <b>이전에 냈던 카드는 덮여서 사라져요</b> — 계산에는 지금 보이는 맨 위 카드만 씁니다.</li>
-            <li>모든 사람이 지금 내놓은 카드 중 <b>같은 과일</b>끼리 개수를 더해보세요.</li>
-            <li>그 합이 정확히 <b>5</b>가 되는 순간 — 종을 가장 먼저 치면 그동안 각자 앞에 쌓여있던(덮인 것 포함) 카드를 전부 가져가고, 다음 차례는 내가 시작해요.</li>
-            <li>합이 5가 아닐 때 종을 치면 벌칙으로 다른 사람들에게 내 카드를 한 장씩 나눠줘야 해요.</li>
-            <li>카드가 0장인 채로 자기 차례가 오면 2초 동안 종을 칠 기회가 있고, 그 안에 못 가져오면 탈락 — 이미 낸 카드는 계속 합산에 쓰여요.</li>
-            <li>모든 카드를 혼자 다 모으거나, 남은 사람이 나 혼자면 승리!</li>
-          </ul>
-        </details>
-      </div>
-    </div>
-  );
-}
-
-function EndedScreen({
-  room,
-  me,
-  code,
-  onRestart,
-  onSetPublic,
-  onLeave,
-  error,
-}: {
-  room: RoomPublicState;
-  me: string;
-  code: string;
-  onRestart: () => void;
-  onSetPublic: (isPublic: boolean) => void;
-  onLeave: () => void;
-  error: string | null;
-}) {
-  const winner = room.players.find((p) => p.id === room.winnerId);
-  const myPlayer = room.players.find((p) => p.id === me);
-  return (
-    <div className="gate">
-      <div className="gate-card">
-        <h1>🏆 게임 종료</h1>
-        <p className="gate-title">
-          {winner?.name ?? '알 수 없음'}
-          {room.winnerId === me ? ' (나) 승리!' : ' 승리!'}
-        </p>
-        <p className="gate-hint">다음 판에 친구를 더 부를 수 있어요</p>
-        <PublicToggle isPublic={room.isPublic} isHost={!!myPlayer?.isHost} onChange={onSetPublic} />
-        <InviteBox code={code} />
-        <PlayerList players={room.players} me={me} />
-        {myPlayer?.isHost ? (
-          <button className="gate-button" disabled={room.players.length < 2} onClick={onRestart}>
-            다시 플레이 ({room.players.length}/{MAX_PLAYERS})
-          </button>
-        ) : (
-          <p className="gate-hint">방장이 다시 시작하기를 기다리는 중…</p>
-        )}
-        <button className="gate-button gate-button-secondary" onClick={onLeave}>
-          방 나가기
-        </button>
-        {error && ERROR_KO[error] && <div className="toast-error">{ERROR_KO[error]}</div>}
       </div>
     </div>
   );

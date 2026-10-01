@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { checkRoomStatus, createRoom, joinRoom, startMatching, type Identity } from './api';
 import { GameBoard } from './components/GameBoard';
 import { NameGate } from './components/Lobby';
+import { RulesSheet } from './components/Rules';
 import { MAX_PLAYERS } from '../../shared/types';
 import { clearLastRoom, forgetRoom, loadIdentity, loadLastName, loadLastRoom, saveIdentity, saveLastName } from './identity';
 
@@ -85,6 +86,7 @@ function Home({
   const cancelMatchRef = useRef<(() => void) | null>(null);
   const { toast, show } = useToast();
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const [showRules, setShowRules] = useState(false);
 
   // 화면을 떠나면 매칭 대기열에서도 빠짐
   useEffect(() => () => cancelMatchRef.current?.(), []);
@@ -190,80 +192,104 @@ function Home({
     }
   }
 
+  const matching = matchWaiting !== null;
+
   return (
-    <div>
-      <div className="gate">
-        <div className="gate-card">
-          <h1>🔔 할리갈리</h1>
+    <div className="screen home">
+      <main className="screen-body">
+        <div className="home-hero">
+          <div className="home-logo">🔔</div>
+          <h1>할리갈리</h1>
+          <p>같은 과일이 딱 5개가 되면 — 종을 먼저 쳐요!</p>
+        </div>
 
-          {resumeCode && (
-            <div className="resume-banner">
-              <p>진행 중이던 방 {resumeCode}이 있어요</p>
-              <button className="gate-button resume-button" onClick={() => navigate(`/room/${resumeCode}`)}>
-                이어서 하기
-              </button>
-            </div>
-          )}
+        {resumeCode && !matching && (
+          <section className="panel resume-banner">
+            <p>진행 중이던 방 {resumeCode}이 있어요</p>
+            <button className="gate-button resume-button" onClick={() => navigate(`/room/${resumeCode}`)}>
+              이어서 하기
+            </button>
+          </section>
+        )}
 
-          <p className="gate-title">닉네임을 입력하세요</p>
+        <section className="panel">
+          <label className="field-label" htmlFor="nickname">
+            닉네임
+          </label>
           <input
+            id="nickname"
             ref={nameInputRef}
             className="gate-input"
-            placeholder="닉네임"
+            placeholder="다른 사람에게 보일 이름"
             value={name}
             maxLength={20}
-            disabled={matchWaiting !== null}
+            autoComplete="nickname"
+            disabled={matching}
             onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
           />
+        </section>
 
-          {matchWaiting !== null ? (
-            <div className="matching-box">
-              <div className="matching-spinner" />
-              <p className="matching-title">함께할 사람을 찾는 중…</p>
-              <p className="gate-hint">
-                {matchWaiting > 1
-                  ? `나를 포함해 ${matchWaiting}명이 기다리는 중`
-                  : '참여 가능한 방이 생기거나 다른 사람이 오면 바로 입장해요'}
-              </p>
-              <button className="gate-button gate-button-secondary" onClick={cancelRandomMatch}>
-                매칭 취소
+        {matching ? (
+          <section className="panel matching-box">
+            <div className="matching-spinner" />
+            <p className="matching-title">함께할 사람을 찾는 중…</p>
+            <p className="gate-hint">
+              {matchWaiting > 1
+                ? `나를 포함해 ${matchWaiting}명이 기다리는 중`
+                : '참여 가능한 방이 생기거나 다른 사람이 오면 바로 입장해요'}
+            </p>
+            <button className="gate-button gate-button-secondary" onClick={cancelRandomMatch}>
+              매칭 취소
+            </button>
+          </section>
+        ) : (
+          <>
+            <div className="choice-grid">
+              <button className="choice choice-match" disabled={busy} onClick={handleRandomMatch}>
+                <span className="choice-icon">🎲</span>
+                <b>랜덤 매칭</b>
+                <span>아무나와 바로 한 판</span>
+              </button>
+              <button className="choice choice-create" disabled={busy} onClick={handleCreate}>
+                <span className="choice-icon">🏠</span>
+                <b>{busy ? '만드는 중…' : '방 만들기'}</b>
+                <span>친구를 초대해서</span>
               </button>
             </div>
-          ) : (
-            <>
-              <button className="gate-button" disabled={busy} onClick={handleCreate}>
-                {busy ? '처리 중…' : '방 만들기'}
-              </button>
-              <button className="gate-button gate-button-match" disabled={busy} onClick={handleRandomMatch}>
-                🎲 랜덤 매칭
-              </button>
-            </>
-          )}
 
-          <div className="code-join">
-            <p className="code-join-label">또는 초대코드로 바로 입장</p>
-            <div className="code-join-row">
-              <input
-                className="gate-input code-join-input"
-                placeholder="0000"
-                value={code}
-                inputMode="numeric"
-                maxLength={4}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 4))}
-                onKeyDown={(e) => e.key === 'Enter' && handleJoinByCode()}
-              />
-              <button
-                className="gate-button gate-button-secondary code-join-button"
-                disabled={code.length !== 4 || busy || matchWaiting !== null}
-                onClick={handleJoinByCode}
-              >
-                입장
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
+            <section className="panel code-join">
+              <label className="field-label" htmlFor="room-code">
+                초대코드로 입장
+              </label>
+              <div className="code-join-row">
+                <input
+                  id="room-code"
+                  className="gate-input code-join-input"
+                  placeholder="0000"
+                  value={code}
+                  inputMode="numeric"
+                  autoComplete="off"
+                  maxLength={4}
+                  onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                  onKeyDown={(e) => e.key === 'Enter' && handleJoinByCode()}
+                />
+                <button
+                  className="gate-button gate-button-secondary code-join-button"
+                  disabled={code.length !== 4 || busy}
+                  onClick={handleJoinByCode}
+                >
+                  입장
+                </button>
+              </div>
+            </section>
+          </>
+        )}
+
+        <button className="link-button" onClick={() => setShowRules(true)}>
+          처음이세요? 게임 방법 보기
+        </button>
+      </main>
+      {showRules && <RulesSheet onClose={() => setShowRules(false)} />}
       {toast && <div className="toast-error">{toast}</div>}
     </div>
   );
@@ -298,7 +324,7 @@ function RoomEntry({
   return (
     <div>
       <NameGate
-        title={`"${code}" 방에 참가할 닉네임을 입력하세요`}
+        title={`${code}번 방에 초대받았어요! 사용할 닉네임을 입력하세요`}
         buttonLabel="참가하기"
         busy={busy}
         onSubmit={async (name) => {
@@ -316,7 +342,7 @@ function RoomEntry({
         }}
       >
         <button className="gate-button gate-button-secondary" onClick={() => navigate('/')}>
-          새로운 방 만들기
+          처음 화면으로
         </button>
       </NameGate>
       {toast && <div className="toast-error">{toast}</div>}
