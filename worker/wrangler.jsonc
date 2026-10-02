@@ -17,7 +17,10 @@
   "assets": {
     "directory": "../client/dist",
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
+    "not_found_handling": "single-page-application",
+    // 워커가 먼저 받는 경로: API + 첫 화면/초대 링크(링크 미리보기 og 태그 채움). 나머지 정적 파일은 바로 서빙.
+    // 주의: 목록에 없는 경로는 워커를 아예 안 거치므로 /api/* 를 빼면 API가 전부 405가 됨
+    "run_worker_first": ["/api/*", "/", "/room/*"]
   },
   "dev": {
     "port": 8787

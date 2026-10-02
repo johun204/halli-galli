@@ -55,6 +55,8 @@ interface ConditionMark {
   at: number;
   flipId: number;
   fruit: Fruit | null;
+  /** 이 기록을 만든 카드를 낸 사람 (판 시작/재개 기록이면 null) */
+  playerId: string | null;
 }
 
 /** Durable Object의 storage에 그대로 넣을 수 있는 직렬화 가능한 형태 */
@@ -412,9 +414,14 @@ export class Room {
   }
 
   /** 지금 카드 상태를 시각과 함께 기록. reset이면 이전 판 기록을 버리고 새로 시작 */
-  private logCondition(reset = false) {
+  private logCondition(reset = false, playerId: string | null = null) {
     if (reset) this.conditionLog = [];
-    this.conditionLog.push({ at: Date.now(), flipId: this.lastFlip?.resultId ?? 0, fruit: this.evaluateCondition() });
+    this.conditionLog.push({
+      at: Date.now(),
+      flipId: this.lastFlip?.resultId ?? 0,
+      fruit: this.evaluateCondition(),
+      playerId,
+    });
   }
 
   /** 서버 시각 t에 유효하던 기록의 인덱스 (t는 이번 판 시작 이후여야 함) */
@@ -466,7 +473,7 @@ export class Room {
     player.playedPile.push(card); // 이전에 낸 카드는 덮여서 계산 대상에서 사라짐
     player.lastActionAt = Date.now();
     this.lastFlip = { playerId, at: Date.now(), resultId: ++this.flipCounter };
-    this.logCondition();
+    this.logCondition(false, playerId);
 
     // 턴은 종 여부와 무관하게 계속 진행됨 (실제 할리갈리처럼 - 아무도 안 치면 그냥 다음 사람이 계속 냄)
     this.syncTurn(1);
@@ -502,9 +509,18 @@ export class Room {
     const serverIdx = this.markIndexAt(pressedAt);
     let idx = this.conditionLog.findIndex((m) => m.flipId === seenFlipId);
     const next = this.conditionLog[idx + 1];
-    // 화면 기준을 못 믿는 경우 서버 기록으로 판정: 모르는 카드 / 누른 시각보다 나중 카드 /
-    // 다음 카드가 나온 지 (왕복지연 + 여유)보다 오래 지나서 이미 화면에 보였어야 하는 경우
-    if (idx === -1 || idx > serverIdx || (next && pressedAt - next.at > rtt + STALE_MARGIN_MS)) idx = serverIdx;
+    // 화면 기준을 못 믿는 경우 서버 기록으로 판정: 모르는 카드 /
+    // 다음 카드가 나온 지 (왕복지연 + 여유)보다 오래 지나서 이미 화면에 보였어야 하는 경우.
+    // (누른 시각이 그 카드보다 앞서 보이는 건 시계 보정 오차일 뿐 - 그 카드를 받아서 봤다는 뜻이므로 그대로 인정하고
+    //  아래에서 누른 시각만 카드 이후로 밀어줌. 예전엔 이때 이전 카드 상태로 판정해버리는 버그가 있었음)
+    if (idx === -1 || (next && pressedAt - next.at > rtt + STALE_MARGIN_MS)) idx = serverIdx;
+    // 내가 낸 카드는 서버 응답을 기다리지 않아도 내 자리에 이미 놓여 있음(이전 카드는 덮였음).
+    // 카드를 내자마자 종을 치면 화면 기준 카드가 내 카드 이전 것일 수 있는데, 그 상태로 판정하면 안 됨
+    let ownIdx = -1;
+    this.conditionLog.forEach((m, i) => {
+      if (m.playerId === playerId) ownIdx = i;
+    });
+    idx = Math.max(idx, ownIdx);
     const seen = this.conditionLog[idx];
     // 카드가 화면에 도착하고(단방향 지연) 사람이 반응하기(최소 반응시간)도 전에 눌렀다는 주장은 잘라냄
     pressedAt = Math.max(pressedAt, seen.at + rtt / 2 + MIN_REACTION_MS);

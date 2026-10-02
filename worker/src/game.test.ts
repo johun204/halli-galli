@@ -525,3 +525,57 @@ test('5인 상태가 여러 장에 걸쳐 이어지면 처음 5가 된 카드부
   tick(600);
   assert.equal(state().lastBellResult?.winnerId, a);
 });
+
+test('버그 수정: 카드를 내자마자(내 화면에 새 상태가 오기 전에) 종을 쳐도, 내가 낸 카드를 포함한 상태로 판정', () => {
+  const { room, ids, state, flipId } = setup([
+    [...filler(1), card('lime', 2)],
+    [...filler(1), card('lime', 3)],
+  ]);
+  const [a, b] = ids;
+  room.flip(a); // lime 2
+  const beforeMine = flipId();
+  tick(400);
+  room.flip(b); // lime 3 -> 합 5 (b가 방금 냄)
+  tick(60);
+  // b의 화면엔 아직 서버 응답이 안 와서 seenFlipId가 자기 카드 이전 것 - 그래도 자기가 낸 카드는 반영해야 함
+  room.bell(b, Date.now(), beforeMine, { [beforeMine]: 450 });
+  tick(600);
+  assert.equal(state().lastBellResult?.winnerId, b);
+  assert.equal(state().lastBellResult?.fruit, 'lime');
+});
+
+test('버그 수정: 내가 낸 카드로 5가 깨졌는데 이전 상태(5)로 정답 처리되면 안 됨', () => {
+  const { room, ids, state, flipId } = setup([
+    [...filler(1), card('plum', 5)],
+    [...filler(1), card('plum', 1)],
+  ]);
+  const [a, b] = ids;
+  room.flip(a); // 포도 5
+  const fiveId = flipId();
+  tick(400);
+  room.flip(b); // 포도 1 -> 6, 깨짐
+  tick(60);
+  room.bell(b, Date.now(), fiveId, { [fiveId]: 460 });
+  tick(600);
+  assert.equal(state().lastBellResult?.winnerId, null, '내가 깬 상태를 못 봤다고 우길 수 없음 -> 오답');
+});
+
+test('버그 수정: 시계 보정이 조금 늦어서 누른 시각이 카드보다 앞서 보여도, 화면에 있던 새 카드 기준으로 판정', () => {
+  const { room, ids, state, flipId } = setup([
+    [...filler(1), card('banana', 4)],
+    [...filler(1), card('banana', 1)],
+  ]);
+  const [a, b] = ids;
+  room.recordRtt(a, 40);
+  room.flip(a); // 바나나 4
+  tick(300);
+  room.flip(b); // 바나나 1 -> 5
+  const fiveId = flipId();
+  const flippedAt = Date.now();
+  tick(250);
+  // a는 새 카드를 보고 쳤지만 시계가 300ms 늦게 보정돼 있어서 누른 시각이 카드보다 앞서 보임
+  room.bell(a, flippedAt - 50, fiveId, { [fiveId]: 220 });
+  tick(600);
+  assert.equal(state().lastBellResult?.winnerId, a);
+  assert.equal(state().lastBellResult?.fruit, 'banana');
+});
