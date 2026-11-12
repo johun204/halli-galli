@@ -229,7 +229,7 @@ export function GameBoard({
         onRing={handleRing}
       />
 
-      {room.paused && room.lastBellResult && <PauseOverlay result={room.lastBellResult} nameOf={nameOf} />}
+      {room.paused && room.lastBellResult && <PauseOverlay result={room.lastBellResult} players={room.players} />}
       {error && GAME_ERROR_KO[error] && <div className="toast-error">{GAME_ERROR_KO[error]}</div>}
       {showRules && <RulesSheet onClose={() => setShowRules(false)} />}
 
@@ -270,23 +270,25 @@ function EmojiPicker({ onPick }: { onPick: (emoji: ReactionEmoji) => void }) {
 
 function PauseOverlay({
   result,
-  nameOf,
+  players,
 }: {
   result: NonNullable<RoomPublicState['lastBellResult']>;
-  nameOf: (id: string | null) => string;
+  players: RoomPublicState['players'];
 }) {
-  const ringerName = result.winnerId ? nameOf(result.winnerId) : nameOf(result.penalizedIds[0]);
+  const ringer = players.find((p) => p.id === (result.winnerId ?? result.penalizedIds[0]));
 
   return (
     <div className="pause-overlay">
       <div className="pause-card">
         <p>
-          🔔 <b>{ringerName}</b>님이 종을 쳤어요!
+          🔔 <b>{ringer?.name ?? ''}</b>님이 종을 쳤어요!
         </p>
         <p>
           {result.winnerId
             ? `${result.fruit ? FRUIT_KO[result.fruit] : ''} 5개 정답 — ${result.tookCards}장 획득!`
-            : '땡, 못 맞췄어요 — 다른 사람들에게 카드 1장씩 나눠줘요'}
+            : ringer?.eliminated
+              ? '땡, 못 맞췄어요 — 나눠줄 카드가 없어서 탈락!'
+              : '땡, 못 맞췄어요 — 다른 사람들에게 카드 1장씩 나눠줘요'}
         </p>
       </div>
     </div>

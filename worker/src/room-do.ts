@@ -15,6 +15,8 @@ const ALLOWED_EMOJI = new Set<string>(REACTIONS);
 const EMOJI_COOLDOWN_MS = 500;
 // 전원 접속 종료 후 이만큼 지나면 방을 비움 (코드가 다시 쓰일 수 있게)
 const EMPTY_ROOM_CLEANUP_MS = 60_000;
+// 게임 중이 아닐 때(대기실/게임 종료 화면)는 더 오래 기다림 - 방장이 초대 링크를 보내러 다른 앱에 가 있는 동안 방이 사라지면 안 됨
+const EMPTY_LOBBY_CLEANUP_MS = 15 * 60_000;
 
 interface WsAttachment {
   playerId: string;
@@ -129,6 +131,7 @@ export class RoomDurableObject extends DurableObject<Env> {
       this.room.configureTurnLimit(body.turnLimitSec);
       this.room.isPublic = body.isPublic === true;
       const { playerId, secret } = this.room.addPlayer(body.name);
+      await this.scheduleCleanupIfEmpty(); // 만들기만 하고 접속하지 않은 방이 코드를 영원히 차지하지 않게
       return Response.json({ playerId, secret, room: this.room.toPublicState(this.connectedIds()) });
     }
 
@@ -143,6 +146,7 @@ export class RoomDurableObject extends DurableObject<Env> {
       }
       try {
         const { playerId, secret } = this.room.addPlayer(body.name, body.viaMatch === true);
+        this.room.reconcileGhosts(); // 참가만 하고 접속하지 않으면 잠시 뒤 내보내도록 예약
         return Response.json({ playerId, secret, room: this.room.toPublicState(this.connectedIds()) });
       } catch (err) {
         return Response.json({ error: err instanceof Error ? err.message : 'ERROR' }, { status: 409 });
@@ -181,6 +185,7 @@ export class RoomDurableObject extends DurableObject<Env> {
       server.serializeAttachment({ playerId } satisfies WsAttachment);
       this.room.reconcileTurnTimerFor(playerId); // 지금 이 사람 차례였다면 원래 제한시간으로 리셋
       this.room.reconcileHost(); // 방장이 돌아왔으면 방장 이양 예약 취소 / 방장 부재 중이면 이양 예약
+      this.room.reconcileGhosts(); // 돌아왔으면 내보내기 예약 취소 / 다른 미접속자는 내보내기 예약
       await this.ctx.storage.deleteAlarm(); // 누군가 들어왔으니 예정돼 있던 방 정리를 취소
       this.broadcast(); // 본인 포함 전원에게 최신 상태 + 접속 상태(초록 점) 갱신
 
@@ -270,13 +275,15 @@ export class RoomDurableObject extends DurableObject<Env> {
     const info = ws.deserializeAttachment() as WsAttachment | null;
     if (info) this.room.reconcileTurnTimerFor(info.playerId); // 지금 이 사람 차례였다면 최소시간으로 단축
     this.room.reconcileHost(); // 방장이 끊겼으면 잠시 뒤 다음 사람에게 넘기도록 예약
+    this.room.reconcileGhosts(); // 대기실에서 오래 끊겨 있으면 내보내도록 예약
     await this.scheduleCleanupIfEmpty();
     this.broadcast();
   }
 
   private async scheduleCleanupIfEmpty() {
     if (this.connectedIds().size === 0) {
-      await this.ctx.storage.setAlarm(Date.now() + EMPTY_ROOM_CLEANUP_MS);
+      const delay = this.room.phase === 'playing' ? EMPTY_ROOM_CLEANUP_MS : EMPTY_LOBBY_CLEANUP_MS;
+      await this.ctx.storage.setAlarm(Date.now() + delay);
     }
   }
 

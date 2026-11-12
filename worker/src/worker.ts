@@ -9,6 +9,7 @@ interface Env {
   ROOM: DurableObjectNamespace;
   MATCH: DurableObjectNamespace;
   ASSETS: Fetcher;
+  JOIN_LIMITER: RateLimit;
 }
 
 // 프론트엔드와 API를 같은 워커가 같은 주소에서 서빙하므로 CORS 헤더는 필요 없음
@@ -55,6 +56,12 @@ export default {
 
     // /api/* 가 아니면 정적 프론트엔드(React 빌드)로 위임 — Vercel/Netlify 불필요
     if (parts[0] !== 'api') return withLinkPreview(await env.ASSETS.fetch(request), url);
+
+    // 방 만들기/참가는 IP당 횟수 제한 - 초대코드를 하나씩 대입해 보거나 방을 마구 만들어 코드를 바닥내는 걸 막음
+    if (parts[1] === 'rooms' && request.method === 'POST') {
+      const { success } = await env.JOIN_LIMITER.limit({ key: request.headers.get('cf-connecting-ip') ?? '' });
+      if (!success) return json({ error: 'RATE_LIMITED' }, 429);
+    }
 
     if (parts[1] === 'rooms' && parts.length === 2 && request.method === 'POST') {
       return createRoomWithRandomCode(env.ROOM, await request.text());

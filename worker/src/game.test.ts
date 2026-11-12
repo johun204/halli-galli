@@ -579,3 +579,76 @@ test('버그 수정: 시계 보정이 조금 늦어서 누른 시각이 카드�
   assert.equal(state().lastBellResult?.winnerId, a);
   assert.equal(state().lastBellResult?.fruit, 'banana');
 });
+
+test('카드 0장인 사람이 잘못 치면 바로 탈락하고, 차례였다면 다음 사람으로 넘어간다', () => {
+  const { room, ids, anyRoom, state, player } = setup([filler(3), filler(3), []]);
+  const [a, b, c] = ids;
+  anyRoom.currentTurnIndex = 2; // 카드 0장인 c의 차례 (종 칠 기회)
+  room.bell(c, Date.now(), 0);
+  tick(500);
+  assert.equal(player(c).eliminated, true);
+  assert.equal(player(a).cardCount + player(b).cardCount, 6, '줄 카드가 없으니 아무도 카드를 받지 않음');
+  assert.equal(state().phase, 'playing');
+  assert.equal(state().currentTurnPlayerId, a, '탈락한 사람 차례는 건너뜀');
+  assert.throws(() => room.bell(c, Date.now(), 0), /ELIMINATED/, '탈락 후에는 종을 계속 쳐서 게임을 멈출 수 없음');
+  room.destroy();
+});
+
+test('카드 0장인 사람이 잘못 쳐서 한 명만 남으면 그 사람 승리. 전원이 0장이어도 마지막 한 명은 남긴다', () => {
+  const two = setup([filler(3), []]);
+  two.room.bell(two.ids[1], Date.now(), 0);
+  tick(500);
+  assert.equal(two.state().phase, 'ended');
+  assert.equal(two.state().winnerId, two.ids[0]);
+
+  const allEmpty = setup([[], []]);
+  allEmpty.room.bell(allEmpty.ids[0], Date.now(), 0);
+  allEmpty.room.bell(allEmpty.ids[1], Date.now(), 0);
+  tick(500);
+  assert.equal(allEmpty.state().phase, 'ended');
+  assert.equal(allEmpty.state().winnerId, allEmpty.ids[1], '둘 다 탈락해서 게임이 멈추면 안 됨');
+});
+
+test('대기실에서 60초 넘게 접속이 끊긴 사람은 내보내고, 그 전에 돌아오거나 아무도 접속해 있지 않으면 그대로 둔다', () => {
+  const room = new Room('TEST');
+  const host = room.addPlayer('host').playerId;
+  const guest = room.addPlayer('guest').playerId;
+  const ghost = room.addPlayer('ghost').playerId;
+  const connected = new Set([host, guest]);
+  room.isPlayerConnected = (id) => connected.has(id);
+  const playerIds = () => room.toPublicState(new Set()).players.map((p) => p.id);
+
+  room.reconcileGhosts(); // ghost는 참가만 하고 접속 안 함
+  tick(30_000);
+  connected.delete(guest);
+  room.reconcileGhosts();
+  tick(20_000);
+  connected.add(guest); // 50초째에 돌아옴
+  room.reconcileGhosts();
+  tick(10_000);
+  assert.deepEqual(playerIds(), [host, guest], '60초 지난 ghost만 나가고 돌아온 guest는 남음');
+
+  connected.clear(); // 전원 끊김 - 방 정리는 Durable Object 몫
+  room.reconcileGhosts();
+  tick(120_000);
+  assert.deepEqual(playerIds(), [host, guest]);
+  room.destroy();
+});
+
+test('게임 중에는 끊겨 있어도 안 내보내고, 판이 끝난 시점부터 60초를 센다', () => {
+  const { room, ids, state } = setup([filler(3), [], filler(3)]);
+  const [a, b, c] = ids;
+  const connected = new Set([a, b]);
+  room.isPlayerConnected = (id) => connected.has(id);
+  room.reconcileGhosts();
+  tick(1000); // c는 게임 내내 끊겨 있음
+  (room as any).players.get(c).eliminated = true;
+  room.bell(b, Date.now(), 0); // 0장인 b가 잘못 쳐서 탈락 -> a만 남아 게임 종료
+  tick(500);
+  assert.equal(state().phase, 'ended');
+  tick(59_000);
+  assert.equal(state().players.length, 3);
+  tick(1000);
+  assert.deepEqual(state().players.map((p) => p.id), [a, b]);
+  room.destroy();
+});

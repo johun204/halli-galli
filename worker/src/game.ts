@@ -26,6 +26,8 @@ const RTT_SAMPLES = 5;
 const OUT_OF_CARDS_GRACE_MS = 2000;
 // 방장이 이만큼 접속이 끊겨 있으면 접속 중인 다음 사람에게 방장을 넘김
 const HOST_TRANSFER_MS = 10_000;
+// 대기실/게임 종료 화면에서 이만큼 접속이 끊겨 있는 사람은 방에서 내보냄 (자리만 차지하는 유령 플레이어 방지)
+const GHOST_REMOVE_MS = 60_000;
 // 종이 울린 뒤 결과를 보여주며 게임을 멈추는 시간.
 const RESULT_PAUSE_MS = 3000;
 
@@ -107,6 +109,10 @@ export class Room {
 
   private hostTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // 접속이 끊긴 사람 -> 끊긴 걸 처음 알아챈 시각 (게임 중에는 세지 않음)
+  private awaySince = new Map<string, number>();
+  private ghostTimer: ReturnType<typeof setTimeout> | null = null;
+
   // 재접속 시 턴 타이머를 원래 시간으로 되돌리는 걸 이번 턴에 이미 썼는지
   private turnResetUsed = false;
 
@@ -159,11 +165,12 @@ export class Room {
 
   /** 대기 중인 타이머를 전부 정리 (테스트 종료 시 / DO가 방을 비울 때 사용) */
   destroy() {
-    for (const t of [this.turnTimer, this.graceTimer, this.pauseTimer, this.hostTimer]) if (t) clearTimeout(t);
+    for (const t of [this.turnTimer, this.graceTimer, this.pauseTimer, this.hostTimer, this.ghostTimer]) if (t) clearTimeout(t);
     this.turnTimer = null;
     this.graceTimer = null;
     this.pauseTimer = null;
     this.hostTimer = null;
+    this.ghostTimer = null;
   }
 
   /** 방 생성 시점에만 씀 (아직 아무도 없어서 host 검증이 의미 없는 시점). 숫자가 아니면 무시 */
@@ -278,6 +285,33 @@ export class Room {
     }, HOST_TRANSFER_MS);
   }
 
+  /**
+   * 접속 상태가 바뀌거나 누가 참가할 때, 게임이 끝날 때 호출. 대기실/게임 종료 화면에서 GHOST_REMOVE_MS 넘게
+   * 접속이 끊겨 있는 사람을 내보냄. 접속 중인 사람이 아무도 없으면 그대로 둠 (방 전체 정리는 Durable Object가 따로 함).
+   */
+  reconcileGhosts() {
+    if (this.ghostTimer) clearTimeout(this.ghostTimer);
+    this.ghostTimer = null;
+    if (this.phase === 'playing') {
+      this.awaySince.clear(); // 게임 중 끊긴 시간은 안 셈 - 판이 끝난 시점부터 다시 셈
+      return;
+    }
+    const now = Date.now();
+    const away = this.turnOrder.filter((id) => !this.isPlayerConnected(id));
+    for (const id of [...this.awaySince.keys()]) if (!away.includes(id)) this.awaySince.delete(id);
+    for (const id of away) if (!this.awaySince.has(id)) this.awaySince.set(id, now);
+    if (away.length === 0 || away.length === this.players.size) return;
+
+    const dueAt = (id: string) => this.awaySince.get(id)! + GHOST_REMOVE_MS;
+    for (const id of away.filter((id) => dueAt(id) <= now)) {
+      this.awaySince.delete(id);
+      this.removePlayer(id);
+    }
+    if (this.awaySince.size === 0) return;
+    const next = Math.min(...[...this.awaySince.keys()].map(dueAt));
+    this.ghostTimer = setTimeout(() => this.reconcileGhosts(), next - now);
+  }
+
   /** 최초 시작뿐 아니라 'ended' 상태에서 방장이 다시 누르면 재시작(재초기화) 용도로도 쓰임 */
   start(playerId: string) {
     const p = this.players.get(playerId);
@@ -313,6 +347,7 @@ export class Room {
 
     this.currentTurnIndex = 0;
     this.phase = 'playing';
+    this.reconcileGhosts();
     this.logCondition(true);
     this.beginTurn();
     this.onChange();
@@ -456,6 +491,7 @@ export class Room {
     if (this.pauseTimer) clearTimeout(this.pauseTimer);
     this.turnDeadline = null;
     this.pauseUntil = null;
+    this.reconcileGhosts();
     return true;
   }
 
@@ -574,8 +610,22 @@ export class Room {
     }
   }
 
+  /**
+   * 잘못 친 사람 벌칙: 카드를 나눠줌. 나눠줄 카드가 한 장도 없으면 탈락
+   * (카드 0장인 사람이 아무 손해 없이 종을 계속 쳐서 게임을 멈추는 걸 막기 위함). 혼자 남은 사람은 탈락시키지 않음
+   */
+  private penalize(playerId: string) {
+    const player = this.players.get(playerId);
+    if (!player) return;
+    if (player.stack.length > 0) {
+      this.giveAwayCards(playerId);
+      return;
+    }
+    const othersLeft = [...this.players.values()].some((p) => p.id !== playerId && !p.eliminated);
+    if (othersLeft) player.eliminated = true;
+  }
+
   private finishAsFalseRing(penalizedId: string) {
-    this.giveAwayCards(penalizedId);
     this.lastBellResult = {
       id: ++this.bellCounter,
       winnerId: null,
@@ -585,7 +635,10 @@ export class Room {
       fruit: null,
       at: Date.now(),
     };
-    this.enterResultPause(); // 턴은 종 여부와 무관하게 이미 진행 중이었으므로 그대로 둠
+    if (!this.checkSoleSurvivorWin()) {
+      this.syncTurn(0); // 턴은 종 여부와 무관하게 이미 진행 중이었으므로 그대로 둠 (지금 차례인 사람이 방금 탈락했을 때만 다음 사람으로)
+      this.enterResultPause();
+    }
     this.onChange();
   }
 
@@ -614,7 +667,8 @@ export class Room {
       this.winnerId = winnerId;
       if (this.turnTimer) clearTimeout(this.turnTimer);
       this.turnDeadline = null;
-    } else {
+      this.reconcileGhosts();
+    } else if (!this.checkSoleSurvivorWin()) {
       this.currentTurnIndex = this.turnOrder.indexOf(winnerId);
       this.enterResultPause();
     }
@@ -635,13 +689,13 @@ export class Room {
     );
     if (winner) {
       // 정답자보다 먼저 잘못 친 사람만 벌칙(조용히 카드만 이동). 정답자보다 늦게 친 종은 무효
-      for (const b of bells) if (!b.fruit && b.pressedAt < winner.pressedAt) this.giveAwayCards(b.playerId);
+      for (const b of bells) if (!b.fruit && b.pressedAt < winner.pressedAt) this.penalize(b.playerId);
       this.finishAsWin(winner.playerId, winner.fruit!);
       return;
     }
 
     // 아무도 못 맞췄으면 전원 벌칙, 결과 표시는 가장 먼저 친 사람 기준
-    for (const b of bells.slice(1)) this.giveAwayCards(b.playerId);
+    for (const b of bells) this.penalize(b.playerId);
     this.finishAsFalseRing(bells[0].playerId);
   }
 

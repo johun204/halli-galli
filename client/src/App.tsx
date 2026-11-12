@@ -11,6 +11,7 @@ const ERROR_KO: Record<string, string> = {
   ROOM_NOT_FOUND: '존재하지 않는 초대코드예요',
   ROOM_UNREACHABLE: '방에 접속할 수 없어요. 방이 사라졌거나 만료됐을 수 있어요',
   ROOMS_EXHAUSTED: '지금은 방을 만들 수 없어요. 잠시 후 다시 시도해주세요',
+  RATE_LIMITED: '요청이 너무 많아요. 잠시 후 다시 시도해주세요',
   ROOM_FULL: `방이 가득 찼어요 (최대 ${MAX_PLAYERS}명)`,
   ALREADY_STARTED: '지금 게임 중인 방이에요. 판이 끝나면 들어올 수 있어요',
   MATCH_FAILED: '매칭에 실패했어요. 잠시 후 다시 시도해주세요',
@@ -47,36 +48,18 @@ function usePathname() {
 
 export default function App() {
   const { pathname, navigate } = usePathname();
-  const [pendingToastCode, setPendingToastCode] = useState<string | null>(null);
   const roomMatch = pathname.match(/^\/room\/([A-Za-z0-9]+)$/);
 
-  function goHomeWithToast(code: string) {
-    setPendingToastCode(code);
-    navigate('/');
-  }
-
   if (roomMatch) {
-    return (
-      <RoomEntry
-        code={roomMatch[1].toUpperCase()}
-        navigate={navigate}
-        onUnreachable={() => goHomeWithToast('ROOM_UNREACHABLE')}
-      />
-    );
+    const code = roomMatch[1].toUpperCase();
+    // key: 뒤로가기 등으로 방 코드만 바뀌어도 그 방의 신원을 새로 읽도록
+    return <RoomEntry key={code} code={code} navigate={navigate} />;
   }
 
-  return <Home navigate={navigate} pendingToastCode={pendingToastCode} onPendingToastShown={() => setPendingToastCode(null)} />;
+  return <Home navigate={navigate} />;
 }
 
-function Home({
-  navigate,
-  pendingToastCode,
-  onPendingToastShown,
-}: {
-  navigate: (path: string) => void;
-  pendingToastCode: string | null;
-  onPendingToastShown: () => void;
-}) {
+function Home({ navigate }: { navigate: (path: string) => void }) {
   const [name, setName] = useState(loadLastName);
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
@@ -90,13 +73,6 @@ function Home({
 
   // 화면을 떠나면 매칭 대기열에서도 빠짐
   useEffect(() => () => cancelMatchRef.current?.(), []);
-
-  useEffect(() => {
-    if (!pendingToastCode) return;
-    show(new Error(pendingToastCode));
-    onPendingToastShown();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingToastCode]);
 
   useEffect(() => {
     const lastRoom = loadLastRoom();
@@ -295,15 +271,7 @@ function Home({
   );
 }
 
-function RoomEntry({
-  code,
-  navigate,
-  onUnreachable,
-}: {
-  code: string;
-  navigate: (path: string) => void;
-  onUnreachable: () => void;
-}) {
+function RoomEntry({ code, navigate }: { code: string; navigate: (path: string) => void }) {
   const [identity, setIdentity] = useState<Identity | null>(() => loadIdentity(code));
   const [busy, setBusy] = useState(false);
   const { toast, show } = useToast();
@@ -313,7 +281,12 @@ function RoomEntry({
       <GameBoard
         code={code}
         identity={identity}
-        onUnreachable={onUnreachable}
+        // 저장된 신원이 더는 안 통함 (방이 정리됐거나 같은 코드로 새 방이 생김) - 지우고 새로 참가할 수 있게 닉네임 입력으로
+        onUnreachable={() => {
+          forgetRoom(code);
+          setIdentity(null);
+          show(new Error('ROOM_UNREACHABLE'));
+        }}
         onLeave={() => {
           forgetRoom(code);
           navigate('/');
